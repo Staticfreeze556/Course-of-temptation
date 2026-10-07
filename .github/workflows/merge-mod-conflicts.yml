@@ -1,0 +1,358 @@
+name: Merge Verified Mod Conflicts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    runs-on: windows-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build a separate merged mod archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          @'
+          import collections
+          import hashlib
+          import re
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          source_zip = Path("mods/mods.zip")
+          game_path = Path("CourseOfTemptation.html")
+          output_dir = Path("merged-output")
+          output_dir.mkdir(exist_ok=True)
+
+          if not source_zip.is_file():
+              raise SystemExit("Required source archive missing: mods/mods.zip")
+          if not game_path.is_file():
+              raise SystemExit("Required original HTML missing: CourseOfTemptation.html")
+
+          game = game_path.read_text(encoding="utf-8-sig")
+          version_match = re.search(
+              r'Config\.saves\.version\s*=\s*["\'](v[^"\']+)["\']',
+              game,
+          )
+          if not version_match:
+              raise SystemExit("Could not verify Config.saves.version in the HTML.")
+          version = version_match.group(1)
+          if version != "v0.8.4d":
+              raise SystemExit(
+                  f"Expected original v0.8.4d HTML; found {version}. "
+                  "No output archive was created."
+              )
+
+          records = {}
+          with zipfile.ZipFile(source_zip) as archive:
+              for info in archive.infolist():
+                  if info.is_dir():
+                      continue
+                  name = info.filename.replace("\\", "/")
+                  path = PurePosixPath(name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"Unsafe archive path: {name}")
+                  if "__MACOSX" in path.parts or path.name.startswith("._"):
+                      continue
+                  key = name.casefold()
+                  if key in records:
+                      raise SystemExit(f"Duplicate archive path: {name}")
+                  records[key] = {
+                      "name": name,
+                      "data": archive.read(info),
+                  }
+
+          mods = {}
+          for key, record in records.items():
+              if not record["name"].lower().endswith(".mod"):
+                  continue
+              raw = record["data"]
+              bom = raw.startswith(b"\xef\xbb\xbf")
+              text = raw.decode("utf-8-sig")
+              text = text.replace("\r\n", "\n")
+              if "\r" in text:
+                  raise SystemExit(
+                      f"Unexpected standalone CR in {record['name']}"
+                  )
+              mods[key] = {
+                  "record": record,
+                  "bom": bom,
+                  "newline": "\r\n" if b"\r\n" in raw else "\n",
+                  "segments": text.split("~~"),
+                  "changed": False,
+              }
+
+          if len(mods) != 52:
+              raise SystemExit(
+                  f"Expected 52 mod files; found {len(mods)}. "
+                  "No output archive was created."
+              )
+
+          by_basename = collections.defaultdict(list)
+          for key, mod in mods.items():
+              base = PurePosixPath(mod["record"]["name"]).name.casefold()
+              by_basename[base].append(key)
+
+          def find_mod(basename):
+              matches = by_basename[basename.casefold()]
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"Expected one {basename}; found {len(matches)}."
+                  )
+              return matches[0]
+
+          def entries():
+              for key, mod in mods.items():
+                  for index, segment in enumerate(mod["segments"]):
+                      if "~" not in segment:
+                          continue
+                      old, new = segment.split("~", 1)
+                      yield key, index, old.strip(), new.strip()
+
+          changes = []
+          used_paths = set()
+
+          def merge_target(target, basenames, new_target=None,
+                           expected_game_count=1, startup=False,
+                           helper=False):
+              expected_keys = [find_mod(name) for name in basenames]
+              found = [
+                  entry for entry in entries()
+                  if entry[2] == target
+              ]
+
+              counts = collections.Counter(entry[0] for entry in found)
+              if set(counts) != set(expected_keys) or any(
+                  counts[key] != 1 for key in expected_keys
+              ):
+                  details = [
+                      mods[key]["record"]["name"] for key, _, _, _ in found
+                  ]
+                  raise SystemExit(
+                      f"Unexpected owners or duplicate entries for {target!r}: "
+                      f"{details}"
+                  )
+
+              anchor = new_target if new_target is not None else target
+              actual_count = game.count(anchor)
+              if actual_count != expected_game_count:
+                  raise SystemExit(
+                      f"Expected {expected_game_count} original HTML matches "
+                      f"for {anchor!r}; found {actual_count}."
+                  )
+
+              lookup = {entry[0]: entry for entry in found}
+              tails = []
+
+              for key in expected_keys:
+                  _, index, old, replacement = lookup[key]
+                  if not replacement.startswith(old):
+                      raise SystemExit(
+                          f"Replacement does not retain its anchor in "
+                          f"{mods[key]['record']['name']}: {target!r}"
+                      )
+
+                  tail = replacement[len(old):].strip()
+                  if not tail:
+                      raise SystemExit(
+                          f"Empty addition in {mods[key]['record']['name']}"
+                      )
+                  if "~" in tail:
+                      raise SystemExit(
+                          f"Unexpected legacy separator inside addition in "
+                          f"{mods[key]['record']['name']}"
+                      )
+
+                  if startup:
+                      malformed = "&lt;&lt;set $pclastresidence&gt;&gt;"
+                      if malformed in tail:
+                          tail = tail.replace(
+                              malformed,
+                              '&lt;&lt;set $pclastresidence to ""&gt;&gt;',
+                          )
+
+                  if helper and tail.rstrip().endswith("},"):
+                      tail = tail.rstrip()[:-1] + ";"
+
+                  tails.append(tail)
+
+              replacement = anchor + "\n\n" + "\n\n".join(tails)
+              keeper = expected_keys[-1]
+
+              for key in expected_keys:
+                  _, index, _, _ = lookup[key]
+                  mod = mods[key]
+                  if key == keeper:
+                      mod["segments"][index] = (
+                          "\n" + anchor + "\n~\n" + replacement + "\n"
+                      )
+                  else:
+                      mod["segments"][index] = ""
+                  mod["changed"] = True
+                  used_paths.add(mod["record"]["name"])
+
+              changes.append(
+                  f"Target: {target}\n"
+                  f"New anchor: {anchor}\n"
+                  f"Combined additions from: {', '.join(basenames)}\n"
+                  f"Stored in: {mods[keeper]['record']['name']}\n"
+                  f"Original HTML anchor matches: {actual_count}\n"
+              )
+
+          trio = [
+              "KittyBuyOtherResidences.mod",
+              "KittyPetNames.mod",
+              "KittyPregnancyMod.mod",
+          ]
+
+          merge_target("this.tattoos = {};", trio)
+          merge_target("this.age = State.variables.pcage;", trio)
+          merge_target("//#endregion Clothing Management", trio)
+
+          merge_target(
+              "return [...new Set(inclins)];\n}",
+              [
+                  "KittyBuyOtherResidences.mod",
+                  "KittyPregnancyMod.mod",
+              ],
+              helper=True,
+          )
+
+          startup_anchor = (
+              "&lt;&lt;set $pcbirthday to setup.random_birthday()&gt;&gt;\n"
+              "&lt;&lt;set $pcage to setup.minimum_pc_starting_age()&gt;&gt;"
+          )
+          merge_target(
+              "&lt;&lt;set $pcage to 18&gt;&gt;",
+              [
+                  "KittyBuyOtherResidences.mod",
+                  "KittyFollowers.mod",
+                  "KittyGoOverAnybodysHouse.mod",
+                  "KittyPetNames.mod",
+                  "KittyPregnancyMod.mod",
+              ],
+              new_target=startup_anchor,
+              startup=True,
+          )
+
+          merged_entries = list(entries())
+          combined_targets = [
+              "this.tattoos = {};",
+              "this.age = State.variables.pcage;",
+              "//#endregion Clothing Management",
+              "return [...new Set(inclins)];\n}",
+              startup_anchor,
+          ]
+          for target in combined_targets:
+              count = sum(old == target for _, _, old, _ in merged_entries)
+              if count != 1:
+                  raise SystemExit(
+                      f"Post-merge validation failed for {target!r}: {count}"
+                  )
+
+          if any(
+              old == "&lt;&lt;set $pcage to 18&gt;&gt;"
+              for _, _, old, _ in merged_entries
+          ):
+              raise SystemExit("Obsolete shared startup target remains.")
+
+          for key, mod in mods.items():
+              if not mod["changed"]:
+                  continue
+              text = "~~".join(mod["segments"])
+              text = text.replace("\n", mod["newline"])
+              encoded = text.encode("utf-8")
+              if mod["bom"]:
+                  encoded = b"\xef\xbb\xbf" + encoded
+              records[key]["data"] = encoded
+
+          output_zip = output_dir / "mods-merged-v0.8.4d.zip"
+          with zipfile.ZipFile(
+              output_zip, "w", compression=zipfile.ZIP_DEFLATED
+          ) as archive:
+              for key in sorted(records):
+                  record = records[key]
+                  archive.writestr(record["name"], record["data"])
+
+          with zipfile.ZipFile(output_zip) as archive:
+              count = sum(
+                  name.lower().endswith(".mod")
+                  for name in archive.namelist()
+              )
+              if count != 52:
+                  raise SystemExit(
+                      f"Output mod-file count validation failed: {count}"
+                  )
+              if archive.testzip() is not None:
+                  raise SystemExit("Output ZIP integrity check failed.")
+
+          report = [
+              "Verified shared-target merge for original v0.8.4d",
+              "",
+              "All 52 mod files retained.",
+              "Original repository ZIP and HTML were not modified.",
+              "Five shared target groups combined.",
+              "",
+              "Explicit adjustments:",
+              "- Startup retains the game's calculated age.",
+              "- Bare pclastresidence initialization becomes an empty string.",
+              "  This is an unset sentinel, not a validated hangout destination.",
+              "- The payrent function assignment's trailing comma becomes a semicolon.",
+              "",
+              "NOT repaired by this helper:",
+              "- Monthly rent-call whitespace mismatch.",
+              "- Rent-event registration's missing anchor.",
+              "- Calendar assignment/variable defect.",
+              "- Rent state synchronization.",
+              "- rentals foregone / rentals foregone action mismatch.",
+              "- Other failed residence location replacements.",
+              "- Remaining duplicate targets or other mod failures.",
+              "- Cheatplus syntax compatibility.",
+              "",
+              "No gameplay or actual patcher execution was performed.",
+              "Merged archive is a diagnostic candidate, not a verified working build.",
+              "",
+              f"Source ZIP SHA256: {hashlib.sha256(source_zip.read_bytes()).hexdigest()}",
+              f"Original HTML SHA256: {hashlib.sha256(game_path.read_bytes()).hexdigest()}",
+              "",
+              "Changed files:",
+          ]
+          report.extend(sorted(used_paths))
+          report += ["", "Merged groups:", ""]
+          report.extend(changes)
+
+          report_path = output_dir / "MergeReport.txt"
+          report_path.write_text("\n".join(report) + "\n", encoding="utf-8")
+
+          print(
+              f"Created candidate archive with {count} mods; "
+              f"{len(used_paths)} mod files changed; "
+              f"{len(changes)} shared groups merged."
+          )
+          '@ | Set-Content -LiteralPath 'merge-conflicts.py' -Encoding utf8
+
+          python merge-conflicts.py
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Merge validation failed. Do not use any output from this run.'
+          }
+
+          Get-Content -LiteralPath 'merged-output/MergeReport.txt' -Raw |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload merged candidate archive and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Merged-Mods-Candidate-${{ github.run_number }}
+          path: |
+            merged-output/mods-merged-v0.8.4d.zip
+            merged-output/MergeReport.txt
+          if-no-files-found: error
