@@ -10,9 +10,12 @@
 3. Wait for preparation and compatibility inspection to finish.
    Download the `Input-Compatibility-Report` artifact and extract it.
 
-4. Give the AI `CompatibilityReport.md` and `InspectionData.json`.
-   Ask it to review the findings and provide complete replacement merger
-   files where changes are needed. Provide any additional files it requests.
+4. Open the [AI handoff instructions](docs/AI-HANDOFF.md).
+   Copy the document into your AI chat and attach `CompatibilityReport.md`
+   and `InspectionData.json`.
+   Ask the AI to review the findings and provide complete replacement
+   merger files where changes are needed.
+   Provide any additional files it requests.
 
 5. Update the merger using the replacement files provided by the AI.
 
