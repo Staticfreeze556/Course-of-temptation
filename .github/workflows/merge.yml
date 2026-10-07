@@ -1,0 +1,73 @@
+name: 03 - Merge Reviewed Mods
+
+on:
+  workflow_dispatch:
+    inputs:
+      inspection_reviewed:
+        description: 'I reviewed the inspection for the current inputs and updated the merger where required.'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-reviewed-mods-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require inspection review acknowledgment
+        env:
+          INSPECTION_REVIEWED: ${{ inputs.inspection_reviewed }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$INSPECTION_REVIEWED" != "true" ]; then
+            echo "::error::Review the current inspection report and update the merger where required before running."
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Apply reviewed merge rules
+        run: python scripts/merge_mods.py
+
+      - name: Upload candidate archive and manifest
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Merged-Mods-${{ github.run_id }}
+          path: |
+            merge-output/Merged_Mods.zip
+            merge-output/MergeManifest.json
+          if-no-files-found: error
+
+      - name: Upload merge report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Merge-Report-${{ github.run_id }}
+          path: merge-output/MergeReport.md
+          if-no-files-found: warn
+
+      - name: Show candidate handoff information
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "## Candidate handoff"
+            echo ""
+            echo "- Merge Run ID: $GITHUB_RUN_ID"
+            echo "- Candidate artifact: Merged-Mods-$GITHUB_RUN_ID"
+            echo "- Archive: Merged_Mods.zip"
+            echo "- Next step: review the merge report, then manually start the patch action."
+            echo "- No repository upload of the candidate is required."
+          } >> "$GITHUB_STEP_SUMMARY"
