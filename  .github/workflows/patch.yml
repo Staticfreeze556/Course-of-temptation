@@ -15,89 +15,137 @@ jobs:
       - name: Download repository
         uses: actions/checkout@v4
 
-      - name: Prepare clean working folder
+      - name: Prepare clean game and mods
+        id: prepare
         shell: pwsh
         run: |
-          $game = "CourseOfTemptation.html"
-          $patcher = "KittyPatcher v0.1.2.exe"
+          $games = @(
+            Get-ChildItem -LiteralPath "." -File |
+            Where-Object {
+              $_.Name -ieq "CourseOfTemptation.html"
+            }
+          )
 
-          if (-not (Test-Path -LiteralPath $game -PathType Leaf)) {
-            throw "Missing $game in the repository's main folder."
+          if ($games.Count -ne 1) {
+            throw "Put CourseOfTemptation.html in the repository's main folder."
           }
 
-          New-Item -ItemType Directory -Path "work/mods" -Force | Out-Null
-          New-Item -ItemType Directory -Path "output" -Force | Out-Null
+          New-Item -ItemType Directory -Path "work/mods" -Force |
+            Out-Null
 
-          Copy-Item -LiteralPath $game -Destination "work/$game"
+          Copy-Item -LiteralPath $games[0].FullName `
+            -Destination "work/CourseOfTemptation.html"
 
-          if (Test-Path -LiteralPath $patcher -PathType Leaf) {
-            Copy-Item -LiteralPath $patcher -Destination "work/$patcher"
-          }
+          $mods = @()
 
           if (Test-Path -LiteralPath "mods") {
             $root = (Resolve-Path -LiteralPath "mods").Path
 
-            Get-ChildItem -LiteralPath "mods" -Filter "*.mod" -File -Recurse |
-              ForEach-Object {
-                $relative = [System.IO.Path]::GetRelativePath(
-                  $root, $_.FullName
-                )
-                $destination = Join-Path "work/mods" $relative
-                $parent = Split-Path -Parent $destination
+            $mods = @(
+              Get-ChildItem -LiteralPath "mods" `
+                -Filter "*.mod" -File -Recurse
+            )
 
-                New-Item -ItemType Directory -Path $parent -Force |
-                  Out-Null
-                Copy-Item -LiteralPath $_.FullName -Destination $destination
-              }
+            foreach ($mod in $mods) {
+              $relative = [System.IO.Path]::GetRelativePath(
+                $root, $mod.FullName
+              )
+
+              $destination = Join-Path "work/mods" $relative
+              $parent = Split-Path -Parent $destination
+
+              New-Item -ItemType Directory -Path $parent -Force |
+                Out-Null
+
+              Copy-Item -LiteralPath $mod.FullName `
+                -Destination $destination
+            }
           }
 
-      - name: Apply mods if present
+          "mod_count=$($mods.Count)" >> $env:GITHUB_OUTPUT
+          Write-Host "Found $($mods.Count) mod file(s)."
+
+      - name: Download patcher from release
+        if: steps.prepare.outputs.mod_count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        working-directory: work
-        timeout-minutes: 3
         run: |
-          $mods = @(
-            Get-ChildItem -LiteralPath "mods" -Filter "*.mod" -File -Recurse
+          gh release download "kitty-patcher" `
+            --repo "Staticfreeze556/Course-of-temptation" `
+            --pattern "KittyPatcher.v0.1.2.zip" `
+            --dir "download"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not download the patcher release attachment."
+          }
+
+          Expand-Archive `
+            -LiteralPath "download/KittyPatcher.v0.1.2.zip" `
+            -DestinationPath "patcher-package" -Force
+
+          $executables = @(
+            Get-ChildItem -LiteralPath "patcher-package" `
+              -Filter "*.exe" -File -Recurse |
+            Where-Object {
+              $_.BaseName -match "^KittyPatcher"
+            }
           )
 
-          if ($mods.Count -eq 0) {
-            Write-Host "No mods present. Keeping the original game."
-            exit 0
+          if ($executables.Count -ne 1) {
+            throw "Expected one KittyPatcher EXE. Inspect the ZIP contents."
           }
 
-          $patcher = "KittyPatcher v0.1.2.exe"
+          $exe = $executables[0]
 
-          if (-not (Test-Path -LiteralPath $patcher -PathType Leaf)) {
-            throw "Missing $patcher."
-          }
+          Get-ChildItem -LiteralPath $exe.DirectoryName -Force |
+            Where-Object { $_.Name -ine "mods" } |
+            ForEach-Object {
+              Copy-Item -LiteralPath $_.FullName `
+                -Destination "work/" -Recurse -Force
+            }
 
-          Write-Host "Applying $($mods.Count) mod file(s)."
+          "PATCHER_NAME=$($exe.Name)" >> $env:GITHUB_ENV
 
-          "" | & ".\$patcher"
+      - name: Apply mods
+        if: steps.prepare.outputs.mod_count != '0'
+        working-directory: work
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $patcher = Join-Path "." $env:PATCHER_NAME
+
+          "" | & $patcher
 
           if ($LASTEXITCODE -ne 0) {
             throw "KittyPatcher exited with code $LASTEXITCODE."
           }
 
-      - name: Collect game and logs
-        if: always()
+      - name: Package successful result
         shell: pwsh
         run: |
-          $game = "work/CourseOfTemptation.html"
+          New-Item -ItemType Directory -Path "output" -Force |
+            Out-Null
 
-          if (Test-Path -LiteralPath $game) {
-            Copy-Item -LiteralPath $game -Destination "output/"
-          }
+          Copy-Item -LiteralPath "work/CourseOfTemptation.html" `
+            -Destination "output/"
 
           if (Test-Path -LiteralPath "work/mods/logs") {
             Copy-Item -LiteralPath "work/mods/logs" `
               -Destination "output/logs" -Recurse -Force
           }
 
-      - name: Upload game and logs
-        if: always()
+      - name: Upload game
         uses: actions/upload-artifact@v4
         with:
-          name: CourseOfTemptation-game-and-logs
+          name: CourseOfTemptation-game
           path: output/
           if-no-files-found: error
+
+      - name: Upload logs if something failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patcher-failure-logs
+          path: work/mods/logs/
+          if-no-files-found: ignore
