@@ -1,0 +1,356 @@
+import collections
+import hashlib
+import json
+import os
+import re
+import sys
+import zipfile
+from pathlib import Path, PurePosixPath
+
+CANDIDATE_DIR = Path("work/_candidate")
+ARCHIVE = CANDIDATE_DIR / "Merged_Mods.zip"
+MANIFEST = CANDIDATE_DIR / "MergeManifest.json"
+RUN_METADATA = Path("work/MergeRun.json")
+SOURCE = Path("Mods.zip")
+GAME = Path("CourseOfTemptation.html")
+MODS_DIR = Path("work/mods")
+REPORT = Path("work/CandidateInspection.md")
+
+blockers = []
+warnings = []
+details = []
+entries = []
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def short(text):
+    text = re.sub(r"\s+", " ", text)
+    return text[:160] + ("..." if len(text) > 160 else "")
+
+
+def load_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        blockers.append(f"Cannot read {path}: {exc}")
+        return {}
+
+
+def finish():
+    status = (
+        "BLOCKED"
+        if blockers
+        else "REVIEW REQUIRED"
+        if warnings
+        else "STATIC CHECKS PASSED"
+    )
+
+    report = [
+        "# Merged Candidate Inspection",
+        "",
+        f"- Status: {status}",
+        f"- Blocking findings: {len(blockers)}",
+        f"- Review warnings: {len(warnings)}",
+        "",
+        "## Verified inputs",
+        "",
+        *details,
+        "",
+        "## Blocking findings",
+        "",
+        *([f"- {item}" for item in blockers] or ["- None detected."]),
+        "",
+        "## Review warnings",
+        "",
+        *([f"- {item}" for item in warnings] or ["- None detected."]),
+        "",
+        "## Limitations",
+        "",
+        "- Static inspection is not patcher execution.",
+        "- Exact target matching is not a simulation of patcher order.",
+        "- Missing targets may depend on another replacement.",
+        "- Shared targets may overwrite each other.",
+        "- JavaScript and SugarCube syntax are not fully validated.",
+        "- Gameplay remains unverified.",
+        "",
+    ]
+
+    REPORT.write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as output:
+            output.write(
+                "# Candidate Preflight\n\n"
+                f"- Status: {status}\n"
+                f"- Blocking findings: {len(blockers)}\n"
+                f"- Review warnings: {len(warnings)}\n"
+                "- Full details: CandidateInspection.md artifact.\n\n"
+            )
+
+    if blockers:
+        raise SystemExit(
+            "Candidate blocked. Download CandidateInspection.md."
+        )
+
+    accepted = (
+        os.environ.get("ACCEPT_STATIC_WARNINGS", "").lower() == "true"
+    )
+
+    if warnings and not accepted:
+        raise SystemExit(
+            "Candidate has review warnings. Download the inspection report. "
+            "After reviewing it, rerun with warning acknowledgment enabled."
+        )
+
+
+def check():
+    for path in (ARCHIVE, MANIFEST, SOURCE, GAME, RUN_METADATA):
+        if not path.is_file():
+            blockers.append(f"Required file missing: {path}")
+
+    if blockers:
+        finish()
+        return
+
+    manifest = load_json(MANIFEST)
+    metadata = load_json(RUN_METADATA)
+
+    if blockers:
+        finish()
+        return
+
+    expected_run = os.environ.get("MERGE_RUN_ID", "")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+
+    if metadata.get("path") != ".github/workflows/merge.yml":
+        blockers.append(
+            "Selected run was not produced by .github/workflows/merge.yml."
+        )
+
+    if metadata.get("conclusion") != "success":
+        blockers.append("Selected merge run did not conclude successfully.")
+
+    if str(metadata.get("id")) != expected_run:
+        blockers.append("Selected run metadata does not match the requested ID.")
+
+    if manifest.get("schema_version") != 1:
+        blockers.append("Unsupported merge manifest schema.")
+
+    if manifest.get("repository") != repository:
+        blockers.append("Manifest repository does not match this repository.")
+
+    if str(manifest.get("workflow_run_id")) != expected_run:
+        blockers.append("Manifest run ID does not match the selected merge run.")
+
+    if manifest.get("checked_commit") != metadata.get("head_sha"):
+        blockers.append("Manifest commit does not match the merge run commit.")
+
+    if manifest.get("candidate_status") != "diagnostic_candidate":
+        blockers.append("Unexpected candidate status in manifest.")
+
+    source_info = manifest.get("source", {})
+    game_info = manifest.get("game", {})
+    candidate_info = manifest.get("candidate", {})
+
+    if source_info.get("filename") != "Mods.zip":
+        blockers.append("Manifest source filename is not Mods.zip.")
+
+    if game_info.get("filename") != "CourseOfTemptation.html":
+        blockers.append("Manifest game filename is unexpected.")
+
+    if candidate_info.get("filename") != "Merged_Mods.zip":
+        blockers.append("Manifest candidate filename is not Merged_Mods.zip.")
+
+    source_hash = sha(SOURCE)
+    game_hash = sha(GAME)
+    candidate_hash = sha(ARCHIVE)
+
+    if source_hash != source_info.get("sha256"):
+        blockers.append(
+            "STALE CANDIDATE: current Mods.zip differs from the merge input."
+        )
+
+    if game_hash != game_info.get("sha256"):
+        blockers.append(
+            "STALE CANDIDATE: current HTML differs from the merge input."
+        )
+
+    if candidate_hash != candidate_info.get("sha256"):
+        blockers.append("Candidate archive hash does not match its manifest.")
+
+    details.extend([
+        f"- Merge Run ID: {expected_run}",
+        f"- Merge commit: {manifest.get('checked_commit', 'unknown')}",
+        f"- Ruleset: {manifest.get('ruleset', 'unknown')}",
+        f"- Original archive SHA256: {source_hash}",
+        f"- Original HTML SHA256: {game_hash}",
+        f"- Candidate SHA256: {candidate_hash}",
+    ])
+
+    if blockers:
+        finish()
+        return
+
+    game = GAME.read_text(encoding="utf-8-sig")
+    normalized_game = re.sub(r"\s+", "", game)
+    members = []
+    seen = set()
+
+    with zipfile.ZipFile(ARCHIVE) as archive:
+        bad = archive.testzip()
+        if bad is not None:
+            blockers.append(f"ZIP integrity failure at: {bad}")
+
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+
+            name = info.filename.replace("\\", "/")
+            path = PurePosixPath(name)
+
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or (path.parts and ":" in path.parts[0])
+            ):
+                blockers.append(f"Unsafe archive path: {name}")
+                continue
+
+            if "__MACOSX" in path.parts or path.name.startswith("._"):
+                continue
+
+            key = name.casefold()
+            if key in seen:
+                blockers.append(f"Duplicate archive path: {name}")
+                continue
+            seen.add(key)
+
+            if not name.lower().endswith(".mod"):
+                continue
+
+            data = archive.read(info)
+            try:
+                text = data.decode("utf-8-sig").replace("\r\n", "\n")
+            except UnicodeError as exc:
+                blockers.append(f"Invalid UTF-8 in {name}: {exc}")
+                continue
+
+            members.append((name, data))
+
+            if (
+                ("Replace:" in text and "With:" in text)
+                or re.search(r"^Add Passage:", text, re.M)
+                or "<e>" in text
+            ):
+                warnings.append(
+                    f"Additional patch-format markers in {name}; "
+                    "the simple target inspection does not interpret them."
+                )
+
+            parsed = 0
+            for segment in text.split("~~"):
+                if "~" not in segment:
+                    continue
+                old, new = segment.split("~", 1)
+                old, new = old.strip(), new.strip()
+                parsed += 1
+                entries.append((name, old, new))
+
+                if not old:
+                    blockers.append(f"Empty search target in {name}.")
+                    continue
+
+                count = game.count(old)
+
+                if count == 0:
+                    normalized = re.sub(r"\s+", "", old)
+                    explanation = (
+                        "possible whitespace difference"
+                        if normalized and normalized in normalized_game
+                        else "no exact original HTML match"
+                    )
+                    warnings.append(
+                        f"{name}: {short(old)!r} — {explanation}."
+                    )
+                elif count > 1:
+                    warnings.append(
+                        f"{name}: {short(old)!r} — "
+                        f"{count} original HTML matches."
+                    )
+
+            if not parsed:
+                warnings.append(
+                    f"No ~~ / ~ replacements parsed from {name}."
+                )
+
+    if not members:
+        blockers.append("Candidate contains no readable .mod files.")
+
+    if len(members) != manifest.get("mod_count"):
+        blockers.append(
+            "Readable mod count does not match the merge manifest."
+        )
+
+    owners = collections.defaultdict(set)
+
+    for name, old, new in entries:
+        owners[old].add(name)
+
+    for old, names in owners.items():
+        if len(names) > 1:
+            warnings.append(
+                f"Shared target {short(old)!r}: {', '.join(sorted(names))}."
+            )
+
+    groups = manifest.get("merged_groups")
+    if not isinstance(groups, list) or not groups:
+        blockers.append("Manifest has no valid merged-group list.")
+    else:
+        for group in groups:
+            anchor = group.get("output_anchor")
+            keeper = group.get("stored_in")
+            matches = [
+                entry for entry in entries
+                if entry[1] == anchor
+            ]
+
+            if len(matches) != 1:
+                blockers.append(
+                    f"Expected one surviving merged target for {anchor!r}; "
+                    f"found {len(matches)}."
+                )
+            elif matches[0][0] != keeper:
+                blockers.append(
+                    f"Merged target stored in an unexpected file: {anchor!r}."
+                )
+
+    details.extend([
+        f"- Readable mod files: {len(members)}",
+        f"- Parsed replacement entries: {len(entries)}",
+    ])
+
+    finish()
+
+    MODS_DIR.mkdir(parents=True, exist_ok=True)
+
+    for name, data in members:
+        relative = PurePosixPath(name).with_suffix(".mod")
+        destination = MODS_DIR.joinpath(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+
+    print(f"Candidate accepted for diagnostic patching: {len(members)} mods.")
+
+
+if __name__ == "__main__":
+    try:
+        check()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        blockers.append(f"Preflight failed: {type(exc).__name__}: {exc}")
+        finish()
