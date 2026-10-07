@@ -1,0 +1,1 @@
+                &lt;&lt;if !setup.people.planned_date_with($phonetexter) and (!$hangoutstoday or !$hangoutstoday.includes($phonetexter))&gt;&gt;~                &lt;&lt;if !setup.people.planned_date_with($phonetexter)&gt;&gt;
