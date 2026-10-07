@@ -1,0 +1,151 @@
+name: Patch Course of Temptation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Prepare clean game and mods
+        id: prepare
+        shell: pwsh
+        run: |
+          $games = @(
+            Get-ChildItem -LiteralPath "." -File |
+            Where-Object {
+              $_.Name -ieq "CourseOfTemptation.html"
+            }
+          )
+
+          if ($games.Count -ne 1) {
+            throw "Put CourseOfTemptation.html in the repository's main folder."
+          }
+
+          New-Item -ItemType Directory -Path "work/mods" -Force |
+            Out-Null
+
+          Copy-Item -LiteralPath $games[0].FullName `
+            -Destination "work/CourseOfTemptation.html"
+
+          $mods = @()
+
+          if (Test-Path -LiteralPath "mods") {
+            $root = (Resolve-Path -LiteralPath "mods").Path
+
+            $mods = @(
+              Get-ChildItem -LiteralPath "mods" `
+                -Filter "*.mod" -File -Recurse
+            )
+
+            foreach ($mod in $mods) {
+              $relative = [System.IO.Path]::GetRelativePath(
+                $root, $mod.FullName
+              )
+
+              $destination = Join-Path "work/mods" $relative
+              $parent = Split-Path -Parent $destination
+
+              New-Item -ItemType Directory -Path $parent -Force |
+                Out-Null
+
+              Copy-Item -LiteralPath $mod.FullName `
+                -Destination $destination
+            }
+          }
+
+          "mod_count=$($mods.Count)" >> $env:GITHUB_OUTPUT
+          Write-Host "Found $($mods.Count) mod file(s)."
+
+      - name: Download patcher from release
+        if: steps.prepare.outputs.mod_count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release download "kitty-patcher" `
+            --repo "Staticfreeze556/Course-of-temptation" `
+            --pattern "KittyPatcher.v0.1.2.zip" `
+            --dir "download"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not download the patcher release attachment."
+          }
+
+          Expand-Archive `
+            -LiteralPath "download/KittyPatcher.v0.1.2.zip" `
+            -DestinationPath "patcher-package" -Force
+
+          $executables = @(
+            Get-ChildItem -LiteralPath "patcher-package" `
+              -Filter "*.exe" -File -Recurse |
+            Where-Object {
+              $_.BaseName -match "^KittyPatcher"
+            }
+          )
+
+          if ($executables.Count -ne 1) {
+            throw "Expected one KittyPatcher EXE. Inspect the ZIP contents."
+          }
+
+          $exe = $executables[0]
+
+          Get-ChildItem -LiteralPath $exe.DirectoryName -Force |
+            Where-Object { $_.Name -ine "mods" } |
+            ForEach-Object {
+              Copy-Item -LiteralPath $_.FullName `
+                -Destination "work/" -Recurse -Force
+            }
+
+          "PATCHER_NAME=$($exe.Name)" >> $env:GITHUB_ENV
+
+      - name: Apply mods
+        if: steps.prepare.outputs.mod_count != '0'
+        working-directory: work
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $patcher = Join-Path "." $env:PATCHER_NAME
+
+          "" | & $patcher
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "KittyPatcher exited with code $LASTEXITCODE."
+          }
+
+      - name: Package successful result
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "output" -Force |
+            Out-Null
+
+          Copy-Item -LiteralPath "work/CourseOfTemptation.html" `
+            -Destination "output/"
+
+          if (Test-Path -LiteralPath "work/mods/logs") {
+            Copy-Item -LiteralPath "work/mods/logs" `
+              -Destination "output/logs" -Recurse -Force
+          }
+
+      - name: Upload game
+        uses: actions/upload-artifact@v4
+        with:
+          name: CourseOfTemptation-game
+          path: output/
+          if-no-files-found: error
+
+      - name: Upload logs if something failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patcher-failure-logs
+          path: work/mods/logs/
+          if-no-files-found: ignore
