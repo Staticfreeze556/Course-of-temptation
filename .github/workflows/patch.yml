@@ -188,6 +188,111 @@ jobs:
             throw "The game HTML is missing after patching."
           }
 
+      - name: Add modded-build notice
+        if: steps.prepare.outputs.mod_count != '0'
+        env:
+          MOD_COUNT: ${{ steps.prepare.outputs.mod_count }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $path = Join-Path (
+            Get-Location
+          ).Path "work/CourseOfTemptation.html"
+
+          $html = [System.IO.File]::ReadAllText($path)
+          $count = [int]$env:MOD_COUNT
+
+          $notice = @'
+          <!-- KittyPatcher build notice -->
+          <script>
+          (() => {
+            const modCount = __MOD_COUNT__;
+
+            function showModNotice() {
+              if (document.getElementById("kitty-build-notice")) {
+                return;
+              }
+
+              const notice = document.createElement("div");
+              notice.id = "kitty-build-notice";
+              notice.setAttribute("role", "status");
+
+              notice.style.cssText =
+                "position:fixed;" +
+                "left:12px;right:12px;" +
+                "bottom:calc(12px + env(safe-area-inset-bottom, 0px));" +
+                "z-index:2147483647;" +
+                "box-sizing:border-box;" +
+                "padding:12px;" +
+                "border:1px solid #7ac98a;" +
+                "border-radius:10px;" +
+                "background:#17251c;" +
+                "color:#ffffff;" +
+                "font:14px/1.45 system-ui,sans-serif;" +
+                "box-shadow:0 3px 16px rgba(0,0,0,.4);" +
+                "display:flex;align-items:center;gap:12px;";
+
+              const text = document.createElement("span");
+              text.style.flex = "1";
+              text.textContent =
+                "Modded build - patcher completed with " +
+                modCount +
+                " mod files. Check patch logs for unmatched patches.";
+
+              const close = document.createElement("button");
+              close.type = "button";
+              close.textContent = "Dismiss";
+              close.setAttribute("aria-label", "Dismiss mod build notice");
+
+              close.style.cssText =
+                "flex-shrink:0;padding:8px 12px;" +
+                "border:1px solid #7ac98a;border-radius:6px;" +
+                "background:#263e2d;color:white;" +
+                "font:inherit;cursor:pointer;";
+
+              close.addEventListener("click", () => notice.remove());
+
+              notice.append(text, close);
+              document.body.appendChild(notice);
+            }
+
+            if (document.readyState === "loading") {
+              document.addEventListener(
+                "DOMContentLoaded",
+                showModNotice,
+                { once: true }
+              );
+            } else {
+              showModNotice();
+            }
+          })();
+          </script>
+          '@
+
+          $notice = $notice.Replace(
+            "__MOD_COUNT__", $count.ToString()
+          )
+
+          $position = $html.LastIndexOf(
+            "</body>",
+            [System.StringComparison]::OrdinalIgnoreCase
+          )
+
+          if ($position -lt 0) {
+            throw "Could not find the closing body tag to add the notice."
+          }
+
+          $html = $html.Insert($position, $notice)
+
+          [System.IO.File]::WriteAllText(
+            $path,
+            $html,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+          Write-Host "Added modded-build notice for $count mod files."
+
       - name: Package successful result
         shell: pwsh
         run: |
