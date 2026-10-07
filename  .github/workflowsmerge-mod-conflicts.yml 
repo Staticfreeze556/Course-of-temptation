@@ -35,9 +35,7 @@ jobs:
           source_zip = Path("input.mods/Mods.zip")
           game_path = Path("CourseOfTemptation.html")
           output_dir = Path("output/merged-mods")
-          output_zip = output_dir / (
-              f"merged-mods-{EXPECTED_GAME_VERSION}.zip"
-          )
+          output_zip = output_dir / "Merged.Mods.zip"
           report_path = output_dir / "MergeReport.txt"
 
           if not source_zip.is_file():
@@ -51,10 +49,12 @@ jobs:
                   "Required original HTML missing: CourseOfTemptation.html"
               )
 
-          source_bytes = source_zip.read_bytes()
-          game_bytes = game_path.read_bytes()
-          source_hash = hashlib.sha256(source_bytes).hexdigest()
-          game_hash = hashlib.sha256(game_bytes).hexdigest()
+          source_hash = hashlib.sha256(
+              source_zip.read_bytes()
+          ).hexdigest()
+          game_hash = hashlib.sha256(
+              game_path.read_bytes()
+          ).hexdigest()
 
           game = game_path.read_text(encoding="utf-8-sig")
           decoded_game = html.unescape(game)
@@ -416,10 +416,7 @@ jobs:
                   )
 
               for key, record in records.items():
-                  if (
-                      archive.read(record["name"])
-                      != record["data"]
-                  ):
+                  if archive.read(record["name"]) != record["data"]:
                       raise SystemExit(
                           f"Output content mismatch: {record['name']}"
                       )
@@ -519,7 +516,9 @@ jobs:
                       f"- {preview!r}: {', '.join(names)}"
                   )
           else:
-              report.append("- None in the ~~ / ~ parsed entries.")
+              report.append(
+                  "- None in the ~~ / ~ parsed entries."
+              )
 
           report_path.write_text(
               "\n".join(report) + "\n",
@@ -543,11 +542,11 @@ jobs:
           Get-Content -LiteralPath 'output/merged-mods/MergeReport.txt' -Raw |
             Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
 
-      - name: Upload merged candidate and merge report
+      - name: Upload Merged.Mods.zip and merge report
         uses: actions/upload-artifact@v4
         with:
           name: Merged-Mods-Candidate-${{ github.run_number }}
           path: |
-            output/merged-mods/merged-mods-v0.8.4d.zip
+            output/merged-mods/Merged.Mods.zip
             output/merged-mods/MergeReport.txt
           if-no-files-found: error
