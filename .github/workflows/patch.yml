@@ -38,19 +38,40 @@ jobs:
           Copy-Item -LiteralPath $games[0].FullName `
             -Destination "work/CourseOfTemptation.html"
 
+          $modRoot = $null
+          $modZip = "mods/mods.zip"
+
+          if (Test-Path -LiteralPath $modZip -PathType Leaf) {
+            Write-Host "Extracting $modZip"
+
+            Expand-Archive `
+              -LiteralPath $modZip `
+              -DestinationPath "extracted-mods" -Force
+
+            $modRoot = (
+              Resolve-Path -LiteralPath "extracted-mods"
+            ).Path
+
+            Write-Host "Using mods from the ZIP. Loose repository mods are ignored."
+          } elseif (Test-Path -LiteralPath "mods" -PathType Container) {
+            $modRoot = (
+              Resolve-Path -LiteralPath "mods"
+            ).Path
+
+            Write-Host "No mods.zip found. Checking for loose .mod files."
+          }
+
           $mods = @()
 
-          if (Test-Path -LiteralPath "mods") {
-            $root = (Resolve-Path -LiteralPath "mods").Path
-
+          if ($null -ne $modRoot) {
             $mods = @(
-              Get-ChildItem -LiteralPath "mods" `
+              Get-ChildItem -LiteralPath $modRoot `
                 -Filter "*.mod" -File -Recurse
             )
 
             foreach ($mod in $mods) {
               $relative = [System.IO.Path]::GetRelativePath(
-                $root, $mod.FullName
+                $modRoot, $mod.FullName
               )
 
               $destination = Join-Path "work/mods" $relative
@@ -62,6 +83,13 @@ jobs:
               Copy-Item -LiteralPath $mod.FullName `
                 -Destination $destination
             }
+          }
+
+          if (
+            (Test-Path -LiteralPath $modZip -PathType Leaf) -and
+            $mods.Count -eq 0
+          ) {
+            throw "mods/mods.zip contains no .mod files. Extract any nested ZIPs before creating your combined archive."
           }
 
           "mod_count=$($mods.Count)" >> $env:GITHUB_OUTPUT
@@ -107,24 +135,29 @@ jobs:
             }
           )
 
-          # Prefer the top-level EXE over copies inside scripts/.
+          $packageRoot = (
+            Resolve-Path -LiteralPath "patcher-package"
+          ).Path
+
           $topLevel = @(
             $candidates |
             Where-Object {
-              $_.DirectoryName -eq (
-                Resolve-Path -LiteralPath "patcher-package"
-              ).Path
+              $_.DirectoryName -eq $packageRoot
             }
           )
 
           if ($topLevel.Count -eq 1) {
             $exe = $topLevel[0]
-          } elseif ($topLevel.Count -eq 0 -and $candidates.Count -eq 1) {
+          } elseif (
+            $topLevel.Count -eq 0 -and
+            $candidates.Count -eq 1
+          ) {
             $exe = $candidates[0]
           } else {
             $candidates | ForEach-Object {
               Write-Host $_.FullName
             }
+
             throw "Could not unambiguously select the patcher EXE."
           }
 
