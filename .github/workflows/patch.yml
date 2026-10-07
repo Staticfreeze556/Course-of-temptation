@@ -19,6 +19,8 @@ jobs:
         id: prepare
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $games = @(
             Get-ChildItem -LiteralPath "." -File |
             Where-Object {
@@ -65,12 +67,14 @@ jobs:
           "mod_count=$($mods.Count)" >> $env:GITHUB_OUTPUT
           Write-Host "Found $($mods.Count) mod file(s)."
 
-      - name: Download patcher from release
+      - name: Download and prepare KittyPatcher
         if: steps.prepare.outputs.mod_count != '0'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           gh release download "kitty-patcher" `
             --repo "Staticfreeze556/Course-of-temptation" `
             --pattern "KittyPatcher.v0.1.2.zip" `
@@ -84,36 +88,16 @@ jobs:
             -LiteralPath "download/KittyPatcher.v0.1.2.zip" `
             -DestinationPath "patcher-package" -Force
 
-          $executables = @(
-            Get-ChildItem -LiteralPath "patcher-package" `
-              -Filter "*.exe" -File -Recurse |
-            Where-Object {
-              $_.BaseName -match "^KittyPatcher"
-            }
-          )
+          $patcher = "patcher-package/KittyPatcher v0.1.2.exe"
 
-          if ($executables.Count -ne 1) {
-            Write-Host "Matching KittyPatcher EXEs: $($executables.Count)"
-            Write-Host "Files extracted from the ZIP:"
-
-            Get-ChildItem -LiteralPath "patcher-package" -File -Recurse -Force |
-              ForEach-Object {
-                Write-Host $_.FullName
-              }
-
-            throw "Cannot select the patcher automatically. See the file list above."
+          if (-not (Test-Path -LiteralPath $patcher -PathType Leaf)) {
+            throw "The expected top-level KittyPatcher EXE is missing."
           }
 
-          $exe = $executables[0]
+          Copy-Item -LiteralPath $patcher `
+            -Destination "work/KittyPatcher v0.1.2.exe"
 
-          Get-ChildItem -LiteralPath $exe.DirectoryName -Force |
-            Where-Object { $_.Name -ine "mods" } |
-            ForEach-Object {
-              Copy-Item -LiteralPath $_.FullName `
-                -Destination "work/" -Recurse -Force
-            }
-
-          "PATCHER_NAME=$($exe.Name)" >> $env:GITHUB_ENV
+          Write-Host "Selected the top-level KittyPatcher v0.1.2.exe."
 
       - name: Apply mods
         if: steps.prepare.outputs.mod_count != '0'
@@ -121,17 +105,25 @@ jobs:
         shell: pwsh
         timeout-minutes: 3
         run: |
-          $patcher = Join-Path "." $env:PATCHER_NAME
+          $ErrorActionPreference = "Stop"
 
-          "" | & $patcher
+          Write-Host "Running KittyPatcher against the clean game copy."
+
+          "" | & ".\KittyPatcher v0.1.2.exe"
 
           if ($LASTEXITCODE -ne 0) {
             throw "KittyPatcher exited with code $LASTEXITCODE."
           }
 
+          if (-not (Test-Path -LiteralPath "CourseOfTemptation.html")) {
+            throw "The game HTML is missing after patching."
+          }
+
       - name: Package successful result
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           New-Item -ItemType Directory -Path "output" -Force |
             Out-Null
 
@@ -143,14 +135,14 @@ jobs:
               -Destination "output/logs" -Recurse -Force
           }
 
-      - name: Upload game
+      - name: Upload game and patch logs
         uses: actions/upload-artifact@v4
         with:
           name: CourseOfTemptation-game
           path: output/
           if-no-files-found: error
 
-      - name: Upload logs if something failed
+      - name: Upload logs if patching failed
         if: failure()
         uses: actions/upload-artifact@v4
         with:
