@@ -1,0 +1,103 @@
+name: Patch Course of Temptation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Prepare clean working folder
+        shell: pwsh
+        run: |
+          $game = "CourseOfTemptation.html"
+          $patcher = "KittyPatcher v0.1.2.exe"
+
+          if (-not (Test-Path -LiteralPath $game -PathType Leaf)) {
+            throw "Missing $game in the repository's main folder."
+          }
+
+          New-Item -ItemType Directory -Path "work/mods" -Force | Out-Null
+          New-Item -ItemType Directory -Path "output" -Force | Out-Null
+
+          Copy-Item -LiteralPath $game -Destination "work/$game"
+
+          if (Test-Path -LiteralPath $patcher -PathType Leaf) {
+            Copy-Item -LiteralPath $patcher -Destination "work/$patcher"
+          }
+
+          if (Test-Path -LiteralPath "mods") {
+            $root = (Resolve-Path -LiteralPath "mods").Path
+
+            Get-ChildItem -LiteralPath "mods" -Filter "*.mod" -File -Recurse |
+              ForEach-Object {
+                $relative = [System.IO.Path]::GetRelativePath(
+                  $root, $_.FullName
+                )
+                $destination = Join-Path "work/mods" $relative
+                $parent = Split-Path -Parent $destination
+
+                New-Item -ItemType Directory -Path $parent -Force |
+                  Out-Null
+                Copy-Item -LiteralPath $_.FullName -Destination $destination
+              }
+          }
+
+      - name: Apply mods if present
+        shell: pwsh
+        working-directory: work
+        timeout-minutes: 3
+        run: |
+          $mods = @(
+            Get-ChildItem -LiteralPath "mods" -Filter "*.mod" -File -Recurse
+          )
+
+          if ($mods.Count -eq 0) {
+            Write-Host "No mods present. Keeping the original game."
+            exit 0
+          }
+
+          $patcher = "KittyPatcher v0.1.2.exe"
+
+          if (-not (Test-Path -LiteralPath $patcher -PathType Leaf)) {
+            throw "Missing $patcher."
+          }
+
+          Write-Host "Applying $($mods.Count) mod file(s)."
+
+          "" | & ".\$patcher"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "KittyPatcher exited with code $LASTEXITCODE."
+          }
+
+      - name: Collect game and logs
+        if: always()
+        shell: pwsh
+        run: |
+          $game = "work/CourseOfTemptation.html"
+
+          if (Test-Path -LiteralPath $game) {
+            Copy-Item -LiteralPath $game -Destination "output/"
+          }
+
+          if (Test-Path -LiteralPath "work/mods/logs") {
+            Copy-Item -LiteralPath "work/mods/logs" `
+              -Destination "output/logs" -Recurse -Force
+          }
+
+      - name: Upload game and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CourseOfTemptation-game-and-logs
+          path: output/
+          if-no-files-found: error
