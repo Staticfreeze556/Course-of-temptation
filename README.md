@@ -8,14 +8,14 @@
    Upload only one new ZIP at a time. It will automatically be named `Mods.zip`.
 
 3. Wait for preparation and compatibility inspection to finish.
-   Download the `Input-Compatibility-Report` artifact and extract it.
+   Download the `Input-Compatibility-Report` ZIP.
 
-4. Open the [AI handoff instructions](docs/AI-HANDOFF.md).
-   Copy the document into your AI chat and attach `CompatibilityReport.md`
-   and `InspectionData.json`.
-   Ask the AI to review the findings and provide complete replacement
-   merger files where changes are needed.
-   Provide any additional files it requests.
+4. Upload that ZIP to your AI and say:
+   “Read AI-HANDOFF.md first, then review the diagnostic files and provide
+   complete replacement merger files for any required changes.”
+
+   If your AI cannot read ZIP attachments, extract the ZIP and attach
+   the three files inside. Provide any additional source files it requests.
 
 5. Update the merger using the replacement files provided by the AI.
 
