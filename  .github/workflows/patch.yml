@@ -1,0 +1,496 @@
+name: Patch Merged Mods
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'merged-mods/**'
+      - 'CourseOfTemptation.html'
+      - '.github/workflows/patch.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Start from the original HTML and collect merged mods
+        id: prep
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $game = 'CourseOfTemptation.html'
+          $zip = 'merged-mods/merged-mods-v0.8.4d.zip'
+
+          if (-not (Test-Path -LiteralPath $game -PathType Leaf)) {
+            throw 'CourseOfTemptation.html not found in repository root.'
+          }
+
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+            throw 'Merged candidate missing: merged-mods/merged-mods-v0.8.4d.zip. Run Merge Original Mods, download its artifact, extract it, and upload the candidate ZIP to this path.'
+          }
+
+          if (Test-Path -LiteralPath 'work') {
+            Remove-Item -LiteralPath 'work' -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path 'work/mods' -Force | Out-Null
+          Copy-Item -LiteralPath $game -Destination 'work/CourseOfTemptation.html'
+
+          Write-Host "Using merged candidate: $zip"
+          Write-Host 'Original mods and loose repository mods are not used.'
+
+          $srcRoot = Join-Path (Get-Location) 'work/_unzipped'
+          Expand-Archive -LiteralPath $zip -DestinationPath $srcRoot -Force
+
+          $files = @(
+            Get-ChildItem -LiteralPath $srcRoot -Recurse -File |
+              Where-Object {
+                $_.Extension -ieq '.mod' -and
+                $_.Name -notlike '._*' -and
+                $_.FullName -notmatch '__MACOSX'
+              }
+          )
+
+          if ($files.Count -eq 0) {
+            throw 'The merged candidate ZIP contains no .mod files.'
+          }
+
+          $count = 0
+
+          foreach ($f in $files) {
+            $rel = $f.FullName.Substring($srcRoot.Length).TrimStart('\','/')
+            $rel = [IO.Path]::ChangeExtension($rel, '.mod')
+            $dest = Join-Path 'work/mods' $rel
+
+            New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force |
+              Out-Null
+
+            if (Test-Path -LiteralPath $dest) {
+              throw "Two mods map to the same path after normalising: $rel"
+            }
+
+            Copy-Item -LiteralPath $f.FullName -Destination $dest
+            $count++
+          }
+
+          Remove-Item -LiteralPath 'work/_unzipped' -Recurse -Force
+
+          Write-Host "Merged mod files collected: $count"
+          "modcount=$count" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          @(
+            '## Merged mods input'
+            ''
+            "- Archive: $zip"
+            "- Mod files collected: $count"
+            ''
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Download latest KittyPatcher release
+        if: steps.prep.outputs.modcount != '0'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          New-Item -ItemType Directory -Path 'work/_patcher_dl' -Force | Out-Null
+
+          gh release download --repo "$env:GITHUB_REPOSITORY" --pattern 'KittyPatcher*.zip' --dir 'work/_patcher_dl'
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'gh release download failed (is there a release marked Latest?).'
+          }
+
+          $zips = @(Get-ChildItem -LiteralPath 'work/_patcher_dl' -Filter 'KittyPatcher*.zip' -File)
+
+          if ($zips.Count -ne 1) {
+            throw "Latest release must contain exactly one KittyPatcher*.zip, found $($zips.Count)."
+          }
+
+          Write-Host "Patcher zip: $($zips[0].Name)"
+          Expand-Archive -LiteralPath $zips[0].FullName -DestinationPath 'work/_patcher' -Force
+
+      - name: Apply merged mods with KittyPatcher
+        if: steps.prep.outputs.modcount != '0'
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'work/_patcher').Path
+
+          $candidates = @(Get-ChildItem -LiteralPath $root -File -Filter 'KittyPatcher*.exe')
+
+          if ($candidates.Count -eq 0) {
+            $candidates = @(Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'KittyPatcher*.exe')
+          }
+
+          if ($candidates.Count -ne 1) {
+            throw "Expected exactly one matching patcher EXE at the selected search level, found $($candidates.Count)."
+          }
+
+          $exe = $candidates[0]
+          Write-Host "Using patcher: $($exe.FullName)"
+
+          Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path 'work' $exe.Name)
+
+          Push-Location 'work'
+          try {
+            @('') | & ".\$($exe.Name)"
+            $code = $LASTEXITCODE
+          } finally {
+            Pop-Location
+          }
+
+          if ($code -ne 0) {
+            throw "Patcher exited with code $code."
+          }
+
+          Remove-Item -LiteralPath (Join-Path 'work' $exe.Name) -Force
+          Remove-Item -LiteralPath 'work/_patcher_dl','work/_patcher' -Recurse -Force
+
+      - name: Generate and validate structured patch report
+        id: report
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          @'
+          import collections
+          import html as H
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          orig_path, mods_dir, out_md = sys.argv[1:4]
+          orig = Path(orig_path).read_text(encoding="utf-8")
+
+          def escape_twine_tags(content):
+              new_content = re.sub(r'<<(.*?)>>', r'&lt;&lt;\1&gt;&gt;', content)
+              if new_content == content:
+                  return content
+              new_content = H.escape(new_content)
+              new_content = (
+                  new_content.replace('&amp;lt;', '&lt;')
+                  .replace('&amp;gt;', '&gt;')
+                  .replace('&#x27;', '&#39;')
+              )
+
+              def un(m):
+                  return H.unescape(m.group(1)) + H.unescape(m.group(2))
+
+              modified = new_content
+              for pat in (r'(&lt;[^&]*?tw-passage)(data[^&]*?&gt;)',):
+                  for m in re.finditer(pat, new_content, flags=re.DOTALL):
+                      modified = modified.replace(m.group(0), un(m))
+              for m in re.finditer(
+                  r'(&lt;tw-passagedata[^&]*?)(?=&gt;)',
+                  new_content,
+                  flags=re.DOTALL,
+              ):
+                  modified = modified.replace(m.group(0), H.unescape(m.group(1)))
+              return modified
+
+          def parse(content):
+              out = []
+              for r in content.split('~~'):
+                  r = escape_twine_tags(r)
+                  if '~' in r:
+                      o, n = r.split('~', 1)
+                      out.append((o.strip(), n.strip()))
+              for r in content.split('Replace:'):
+                  r = escape_twine_tags(r)
+                  if 'With:' in r:
+                      o, n = r.split('With:', 1)
+                      out.append((o.strip(), n.strip()))
+              return out
+
+          files, entries, unsupported = [], [], []
+          for root, dirs, fs in os.walk(mods_dir):
+              if os.path.abspath(root) == os.path.abspath(mods_dir):
+                  dirs[:] = [d for d in dirs if d.lower() != 'logs']
+              for f in sorted(fs):
+                  if not f.endswith('.mod'):
+                      continue
+                  path = Path(root) / f
+                  rel = os.path.relpath(path, mods_dir).replace(os.sep, '/')
+                  files.append(rel)
+                  text = path.read_text(encoding='utf-8')
+                  if re.search(r'^Add Passage:', text, re.M) or '<e>' in text:
+                      unsupported.append(rel)
+                  for o, n in parse(text):
+                      entries.append((rel, o, n))
+
+          merged = collections.OrderedDict()
+          owners = collections.defaultdict(list)
+          parsed_counts = collections.Counter()
+          for f, o, n in entries:
+              parsed_counts[f] += 1
+              merged[o] = (f, n)
+              if f not in owners[o]:
+                  owners[o].append(f)
+
+          norm = lambda t: re.sub(r'(?:\s|\\n)+', '', t)
+          normalized_orig = norm(orig)
+
+          def evidence(o):
+              if norm(o) in normalized_orig:
+                  return 'same text, different whitespace/indentation (candidate only)'
+              lines = [norm(line) for line in o.split('\n') if norm(line)]
+              hits = [line in normalized_orig for line in lines]
+              if lines and all(hits):
+                  return 'every line exists, but not together'
+              if any(hits):
+                  return 'some lines exist, others do not'
+              return 'no line found'
+
+          replay_html = orig
+          rows = []
+          for o, (f, n) in merged.items():
+              if not o:
+                  rows.append((f, o, 'ERROR', 'empty search target; not replayed'))
+                  continue
+              pat = '(' + re.escape(o).replace(r'\n', r'\s*') + ')'
+              present_original = re.search(pat, orig) is not None
+              suspicious = 'Add Passage:' in n or '<e>' in n
+              if re.search(pat, replay_html):
+                  try:
+                      replay_html = re.sub(pat, n, replay_html)
+                  except Exception as ex:
+                      rows.append((f, o, 'ERROR', str(ex)))
+                      continue
+                  detail = 'replacement contains syntax outside the replay parser' if suspicious else ''
+                  rows.append((f, o, 'applied', detail))
+              elif present_original:
+                  rows.append((f, o, 'conflict', 'present in original, changed before its replay turn'))
+              else:
+                  rows.append((f, o, 'missing', evidence(o)))
+
+          pm = pf = None
+          log_path = Path(mods_dir) / 'logs' / 'ModPatchLog.txt'
+          if log_path.exists():
+              log = log_path.read_text(encoding='utf-8', errors='replace')
+              a = re.search(r'Total replacements made: (\d+)', log)
+              b = re.search(r'Total replacements failed: (\d+)', log)
+              if a:
+                  pm = int(a.group(1))
+              if b:
+                  pf = int(b.group(1))
+
+          ok = sum(row[2] == 'applied' for row in rows)
+          bad = len(rows) - ok
+          version = re.search(r'\.version to &quot;(v[^&]+)&quot;', orig)
+          hints = sorted(set(re.findall(
+              r'\d+\.\d+\.\d+[a-z]?',
+              ' '.join(os.path.dirname(f) for f in files),
+          )))
+
+          def short(text, limit=100):
+              text = re.sub(r'\s+', ' ', text.replace('\n', ' / '))
+              return text[:limit] + ('...' if len(text) > limit else '')
+
+          def cell(text):
+              return text.replace('|', r'\|').replace('`', '')
+
+          L = [
+              '# Patch report',
+              '',
+              f'- Workflow run: {os.environ.get("GITHUB_RUN_NUMBER", "unknown")}',
+              f'- Commit: {os.environ.get("GITHUB_SHA", "unknown")}',
+              f'- Game version string in HTML: {version.group(1) if version else "not found"}',
+              f'- Version-like mod folder text: {", ".join(hints) if hints else "none"} (hint only)',
+              f'- Mod files read: {len(files)}; patch entries parsed: {len(entries)}; distinct targets: {len(merged)}',
+              f'- Replay: {ok} applied, {bad} not applied',
+              f'- Patcher log: {pm if pm is not None else "unknown"} made, {pf if pf is not None else "unknown"} failed',
+              '',
+              '## Report limitations',
+              '',
+              '- This is a diagnostic replay using rules intended for KittyPatcher v0.1.2, not a verification of the downloaded EXE.',
+              '- Equal totals do not prove identical per-target results.',
+              '- Replay filenames are sorted within directories; actual patcher traversal order is unverified.',
+              '- Duplicate-target winners below are replay winners, not independently verified patcher winners.',
+              '- Whitespace classifications are clues, not proof that a replacement is safe.',
+              '- Counts describe replacement targets, not successfully installed whole mods.',
+              '',
+          ]
+
+          if files:
+              if (pm, pf) == (ok, bad):
+                  L += ['Patcher log totals match replay totals.', '']
+              else:
+                  L += ['WARNING: Patcher totals are unavailable or differ from replay.', '']
+          else:
+              L += ['No mod files collected. Game output is an unmodded copy.', '']
+
+          if unsupported:
+              L += [
+                  '## Syntax outside the replay parser',
+                  '',
+                  'These files contain Add Passage: or <e>. Actual EXE support is not verified.',
+                  '',
+              ]
+              L += [f'- {cell(f)}' for f in unsupported]
+              L.append('')
+
+          per = collections.defaultdict(collections.Counter)
+          for f, o, status, detail in rows:
+              per[f][status] += 1
+
+          L += [
+              '## Per mod',
+              '',
+              '| Mod path | Parsed entries | Surviving targets | Applied | Not applied |',
+              '|---|---:|---:|---:|---:|',
+          ]
+          for f in sorted(files):
+              counts = per[f]
+              surviving = sum(counts.values())
+              failed = surviving - counts['applied']
+              L.append(
+                  f'| {cell(f)} | {parsed_counts[f]} | {surviving} | '
+                  f'{counts["applied"]} | {failed} |'
+              )
+          L += [
+              '',
+              'A mod with parsed entries but zero surviving targets was entirely overwritten during replay merging.',
+              '',
+          ]
+
+          for status, title in (
+              ('missing', 'Targets missing from original HTML'),
+              ('conflict', 'Targets changed before their replay turn'),
+              ('ERROR', 'Replay errors'),
+          ):
+              selected = [row for row in rows if row[2] == status]
+              if not selected:
+                  continue
+              L += [f'## {title} ({len(selected)})', '']
+              groups = collections.defaultdict(list)
+              for f, o, s, detail in selected:
+                  groups[detail].append((f, o))
+              for detail, items in sorted(groups.items(), key=lambda item: -len(item[1])):
+                  L += [f'### {detail} ({len(items)})', '']
+                  L += [f'- {cell(f)}: `{cell(short(o))}`' for f, o in items]
+                  L.append('')
+
+          suspicious = [row for row in rows if row[2] == 'applied' and row[3]]
+          if suspicious:
+              L += [f'## Applied but suspicious ({len(suspicious)})', '']
+              L += [
+                  f'- {cell(f)}: `{cell(short(o))}` — {detail}'
+                  for f, o, s, detail in suspicious
+              ]
+              L.append('')
+
+          shared = [(o, fs) for o, fs in owners.items() if len(fs) > 1]
+          if shared:
+              L += [
+                  f'## Shared targets across mods ({len(shared)})',
+                  '',
+                  'Only the last replacement survives for each identical target in this replay.',
+                  '',
+              ]
+              for o, fs in shared:
+                  winner = merged[o][0]
+                  L.append(
+                      f'- `{cell(short(o))}` — {", ".join(cell(f) for f in fs)}; '
+                      f'replay winner: {cell(winner)}'
+                  )
+              L.append('')
+
+          Path(out_md).write_text('\n'.join(L) + '\n', encoding='utf-8')
+
+          if not files:
+              badge = 'Unmodded copy - no mod files collected.'
+          elif pm is not None and pf is not None:
+              if pf:
+                  badge = f'Partially patched build - {pm} targets applied, {pf} failed.'
+              else:
+                  badge = f'Patcher reports {pm} targets applied, 0 failed. Gameplay not verified.'
+          else:
+              badge = f'Diagnostic build - replay: {ok} applied, {bad} not applied; patcher totals unavailable.'
+
+          output_path = os.environ.get('GITHUB_OUTPUT')
+          if output_path:
+              with open(output_path, 'a', encoding='utf-8') as output:
+                  output.write(f'badge={badge}\n')
+
+          print(f'Report written: {ok} replay successes, {bad} replay failures; patcher totals {pm}/{pf}')
+          '@ | Set-Content -LiteralPath 'work/report.py' -Encoding utf8
+
+          python work/report.py 'CourseOfTemptation.html' 'work/mods' 'work/StructuredPatchReport.md'
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'report.py failed.'
+          }
+
+          $reportPath = 'work/StructuredPatchReport.md'
+          $firstLine = Get-Content -LiteralPath $reportPath -TotalCount 1
+
+          if ($firstLine -ne '# Patch report') {
+            throw "Report validation failed. First line: $firstLine"
+          }
+
+          Write-Host 'Verified structured report. First ten lines:'
+          Get-Content -LiteralPath $reportPath -TotalCount 10
+
+          Get-Content -LiteralPath $reportPath -Raw |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+          Remove-Item -LiteralPath 'work/report.py' -Force
+
+      - name: Add build-status badge to HTML
+        shell: pwsh
+        env:
+          BUILD_STATUS: ${{ steps.report.outputs.badge }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = (Resolve-Path 'work/CourseOfTemptation.html').Path
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          $text = [IO.File]::ReadAllText($path, $utf8)
+          $message = [System.Net.WebUtility]::HtmlEncode($env:BUILD_STATUS)
+
+          $badge = '<div id="modded-build-badge" style="position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#222;color:#fff;font:14px/1.3 sans-serif;padding:8px 44px 8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom,0px));text-align:center;">' + $message + '<button type="button" aria-label="Dismiss" onclick="this.parentNode.remove()" style="position:absolute;right:6px;top:4px;background:none;border:0;color:#fff;font-size:22px;line-height:1;padding:4px 10px;">&times;</button></div>'
+
+          $i = $text.LastIndexOf('</body>', [StringComparison]::Ordinal)
+
+          if ($i -lt 0) {
+            throw 'No </body> found; badge not added.'
+          }
+
+          $text = $text.Substring(0, $i) + $badge + $text.Substring($i)
+          [IO.File]::WriteAllText($path, $text, $utf8)
+
+      - name: Upload structured patch report
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Structured-Patch-Report-${{ github.run_number }}
+          path: work/StructuredPatchReport.md
+          if-no-files-found: error
+
+      - name: Upload game output
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CourseOfTemptation-game-${{ github.run_number }}
+          path: work/CourseOfTemptation.html
+          if-no-files-found: error
+
+      - name: Upload raw patcher logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Raw-Patcher-Logs-${{ github.run_number }}
+          path: work/mods/logs/*.txt
+          if-no-files-found: ignore
