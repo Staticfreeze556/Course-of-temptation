@@ -1,0 +1,499 @@
+name: Patch Game with Merged Mods
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare original HTML and merged mods
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $game = 'CourseOfTemptation.html'
+          $archive = 'output/merged-mods/Merged.Mods.zip'
+
+          if (-not (Test-Path -LiteralPath $game -PathType Leaf)) {
+            throw 'Original game missing: CourseOfTemptation.html'
+          }
+
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw 'Merged archive missing: output/merged-mods/Merged.Mods.zip'
+          }
+
+          if (Test-Path -LiteralPath 'work') {
+            Remove-Item -LiteralPath 'work' -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path 'work/mods' -Force |
+            Out-Null
+
+          Copy-Item -LiteralPath $game `
+            -Destination 'work/CourseOfTemptation.html'
+
+          $srcRoot = Join-Path (Get-Location) 'work/_unzipped'
+
+          Expand-Archive -LiteralPath $archive `
+            -DestinationPath $srcRoot -Force
+
+          $files = @(
+            Get-ChildItem -LiteralPath $srcRoot -Recurse -File |
+              Where-Object {
+                $_.Extension -ieq '.mod' -and
+                $_.Name -notlike '._*' -and
+                $_.FullName -notmatch '__MACOSX'
+              }
+          )
+
+          if ($files.Count -eq 0) {
+            throw 'Merged.Mods.zip contains no usable .mod files.'
+          }
+
+          foreach ($file in $files) {
+            $relative = $file.FullName.Substring($srcRoot.Length).TrimStart('\','/')
+            $relative = [IO.Path]::ChangeExtension($relative, '.mod')
+            $destination = Join-Path 'work/mods' $relative
+            $parent = Split-Path $destination -Parent
+
+            New-Item -ItemType Directory -Path $parent -Force |
+              Out-Null
+
+            if (Test-Path -LiteralPath $destination) {
+              throw "Duplicate normalized mod path: $relative"
+            }
+
+            Copy-Item -LiteralPath $file.FullName `
+              -Destination $destination
+          }
+
+          Remove-Item -LiteralPath 'work/_unzipped' -Recurse -Force
+
+          Write-Host "Merged mod files collected: $($files.Count)"
+          Write-Host "Input archive: $archive"
+
+          @(
+            '## Patch inputs'
+            ''
+            '- Original game: CourseOfTemptation.html'
+            '- Merged archive: output/merged-mods/Merged.Mods.zip'
+            "- Mod files collected: $($files.Count)"
+            ''
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Download KittyPatcher from latest release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          New-Item -ItemType Directory -Path 'work/_patcher_dl' -Force |
+            Out-Null
+
+          gh release download `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --pattern 'KittyPatcher*.zip' `
+            --dir 'work/_patcher_dl'
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not download KittyPatcher. The latest release in this repository must contain a KittyPatcher*.zip asset.'
+          }
+
+          $archives = @(
+            Get-ChildItem -LiteralPath 'work/_patcher_dl' `
+              -Filter 'KittyPatcher*.zip' -File
+          )
+
+          if ($archives.Count -ne 1) {
+            throw "Expected one KittyPatcher ZIP in the latest release; found $($archives.Count)."
+          }
+
+          Write-Host "Downloaded: $($archives[0].Name)"
+
+          $archives[0].Name |
+            Set-Content -LiteralPath 'work/PatcherAsset.txt' -Encoding utf8
+
+          Expand-Archive -LiteralPath $archives[0].FullName `
+            -DestinationPath 'work/_patcher' -Force
+
+      - name: Apply merged mods using KittyPatcher
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $root = (Resolve-Path 'work/_patcher').Path
+
+          $candidates = @(
+            Get-ChildItem -LiteralPath $root `
+              -Filter 'KittyPatcher*.exe' -File
+          )
+
+          if ($candidates.Count -eq 0) {
+            $candidates = @(
+              Get-ChildItem -LiteralPath $root `
+                -Filter 'KittyPatcher*.exe' -Recurse -File
+            )
+          }
+
+          if ($candidates.Count -ne 1) {
+            throw "Expected exactly one KittyPatcher executable at the selected search level; found $($candidates.Count)."
+          }
+
+          $exe = $candidates[0]
+          $runtimeFolder = $exe.Directory.FullName
+
+          Write-Host "Selected executable: $($exe.FullName)"
+
+          $runtimeItems = @(
+            Get-ChildItem -LiteralPath $runtimeFolder -Force
+          )
+
+          foreach ($item in $runtimeItems) {
+            if (
+              $item.Name -ieq 'mods' -or
+              $item.Name -ieq 'CourseOfTemptation.html' -or
+              $item.Name -like '_patcher*' -or
+              $item.Name -ieq 'PatcherAsset.txt' -or
+              $item.Name -ieq 'PatcherConsole.txt' -or
+              $item.Name -ieq 'PatchReport.md' -or
+              $item.Name -ieq 'PatchStatus.json'
+            ) {
+              throw "Patcher package contains a conflicting runtime item: $($item.Name)"
+            }
+
+            Copy-Item -LiteralPath $item.FullName `
+              -Destination 'work' -Recurse -Force
+          }
+
+          $code = $null
+
+          Push-Location 'work'
+
+          try {
+            @('') | & ".\$($exe.Name)" 2>&1 |
+              Tee-Object -FilePath 'PatcherConsole.txt'
+
+            $code = $LASTEXITCODE
+          } finally {
+            Pop-Location
+          }
+
+          if ($code -ne 0) {
+            throw "KittyPatcher exited with code $code. Check the diagnostic artifact."
+          }
+
+      - name: Check patch result and add startup notification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          @'
+          import hashlib
+          import html
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          original = Path("CourseOfTemptation.html")
+          archive = Path("output/merged-mods/Merged.Mods.zip")
+          patched = Path("work/CourseOfTemptation.html")
+          report_path = Path("work/PatchReport.md")
+          status_path = Path("work/PatchStatus.json")
+          log_path = Path("work/mods/logs/ModPatchLog.txt")
+          asset_path = Path("work/PatcherAsset.txt")
+
+          def sha(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          if not patched.is_file():
+              raise SystemExit("KittyPatcher did not leave the expected HTML output.")
+
+          original_text = original.read_text(encoding="utf-8-sig")
+          patched_text = patched.read_text(encoding="utf-8-sig")
+
+          changed = patched_text != original_text
+          original_hash = sha(original)
+          archive_hash = sha(archive)
+          before_badge_hash = sha(patched)
+
+          made = None
+          failed = None
+
+          if log_path.is_file():
+              log = log_path.read_text(
+                  encoding="utf-8-sig", errors="replace"
+              )
+
+              made_values = re.findall(
+                  r"Total replacements made:\s*(\d+)", log
+              )
+              failed_values = re.findall(
+                  r"Total replacements failed:\s*(\d+)", log
+              )
+
+              if made_values:
+                  made = int(made_values[-1])
+
+              if failed_values:
+                  failed = int(failed_values[-1])
+
+          decoded_original = html.unescape(original_text)
+          versions = sorted(set(re.findall(
+              r'Config\.saves\.version\s*(?:=|to)\s*'
+              r'["\'](v[^"\'\s<>]+)["\']',
+              decoded_original,
+          )))
+
+          mod_files = sorted(
+              path for path in Path("work/mods").rglob("*")
+              if path.is_file()
+              and path.suffix.lower() == ".mod"
+              and "logs" not in [
+                  part.lower()
+                  for part in path.relative_to("work/mods").parts
+              ]
+          )
+
+          patcher_asset = (
+              asset_path.read_text(encoding="utf-8-sig").strip()
+              if asset_path.is_file()
+              else "unknown"
+          )
+
+          blocking = []
+
+          if not changed:
+              blocking.append(
+                  "Patched HTML is unchanged from the original."
+              )
+
+          if made == 0:
+              blocking.append(
+                  "Patcher reports zero replacements applied."
+              )
+
+          closing_body = re.search(
+              r"</body\s*>", patched_text, flags=re.IGNORECASE
+          )
+
+          if closing_body is None:
+              blocking.append(
+                  "Output HTML has no closing body tag; "
+                  "startup notification cannot be added."
+              )
+
+          if 'id="merged-mods-startup-notice"' in patched_text:
+              blocking.append(
+                  "Output already contains this workflow's notification. "
+                  "Use the untouched original HTML as input."
+              )
+
+          if blocking:
+              status = "BUILD CHECK FAILED"
+              title = "Patch output could not be accepted"
+              message = " ".join(blocking)
+              background = "#7f1d1d"
+          elif made is not None and failed == 0:
+              status = "PATCHER REPORTS ZERO FAILURES"
+              title = "Merged mods applied"
+              message = (
+                  f"KittyPatcher reports {made} replacement targets applied "
+                  "and 0 failed. Gameplay compatibility has not been verified."
+              )
+              background = "#14532d"
+          elif made is not None and failed is not None:
+              status = "PARTIALLY PATCHED"
+              title = "Merged mods partially applied"
+              message = (
+                  f"KittyPatcher reports {made} replacement targets applied "
+                  f"and {failed} failed. Some mod features may not work. "
+                  "Gameplay compatibility has not been verified."
+              )
+              background = "#78350f"
+          else:
+              status = "PATCH TOTALS UNVERIFIED"
+              title = "Modded build — application totals unverified"
+              message = (
+                  "KittyPatcher completed and changed the HTML, but complete "
+                  "replacement totals could not be read from its log. "
+                  "Successful installation of all mods is not confirmed."
+              )
+              background = "#78350f"
+
+          status_data = {
+              "status": status,
+              "game_versions": versions,
+              "mod_files_collected": len(mod_files),
+              "patcher_asset": patcher_asset,
+              "replacements_made": made,
+              "replacements_failed": failed,
+              "html_changed_before_notification": changed,
+              "original_html_sha256": original_hash,
+              "merged_archive_sha256": archive_hash,
+              "patched_html_before_notification_sha256": before_badge_hash,
+              "startup_notification_added": False,
+              "gameplay_verified": False,
+              "blocking_findings": blocking,
+          }
+
+          if not blocking:
+              notice = (
+                  '\n<aside id="merged-mods-startup-notice" '
+                  'role="status" aria-live="polite" '
+                  'style="position:fixed;top:12px;left:50%;'
+                  'transform:translateX(-50%);'
+                  'width:calc(100% - 32px);max-width:680px;'
+                  'box-sizing:border-box;z-index:2147483647;'
+                  f'background:{background};color:#fff;'
+                  'border:1px solid rgba(255,255,255,.35);'
+                  'border-radius:10px;'
+                  'box-shadow:0 8px 28px rgba(0,0,0,.4);'
+                  'padding:16px 48px 16px 18px;'
+                  'font:14px/1.5 Arial,sans-serif;">'
+                  '<strong style="display:block;font-size:16px;'
+                  'margin-bottom:6px;">'
+                  + html.escape(title)
+                  + '</strong><span>'
+                  + html.escape(message)
+                  + '</span>'
+                  '<button type="button" '
+                  'aria-label="Dismiss mod notification" '
+                  'onclick="this.parentNode.remove()" '
+                  'style="position:absolute;right:8px;top:8px;'
+                  'background:transparent;border:0;color:#fff;'
+                  'cursor:pointer;font:26px/1 Arial,sans-serif;'
+                  'padding:4px 8px;">&times;</button>'
+                  '</aside>\n'
+              )
+
+              index = closing_body.start()
+              patched_text = (
+                  patched_text[:index]
+                  + notice
+                  + patched_text[index:]
+              )
+
+              with patched.open(
+                  "w", encoding="utf-8", newline=""
+              ) as output:
+                  output.write(patched_text)
+
+              status_data["startup_notification_added"] = True
+              status_data["final_html_sha256"] = sha(patched)
+
+          status_path.write_text(
+              json.dumps(status_data, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          lines = [
+              "# Merged mods patch report",
+              "",
+              f"- Result: {status}",
+              f'- Workflow run: {os.environ.get("GITHUB_RUN_NUMBER", "unknown")}',
+              f'- Commit: {os.environ.get("GITHUB_SHA", "unknown")}',
+              f'- Game version: {", ".join(versions) or "not found"}',
+              "- Original HTML: CourseOfTemptation.html",
+              "- Archive: output/merged-mods/Merged.Mods.zip",
+              f"- Mod files collected: {len(mod_files)}",
+              f"- Patcher asset: {patcher_asset}",
+              f'- Replacements applied: {made if made is not None else "unknown"}',
+              f'- Replacements failed: {failed if failed is not None else "unknown"}',
+              f"- HTML changed before notification: {changed}",
+              f'- Startup notification added: {status_data["startup_notification_added"]}',
+              "",
+              "## Startup notification",
+              "",
+              title,
+              "",
+              message,
+              "",
+              "## Verification limits",
+              "",
+              "- Counts come from the patcher log, not an independent replay.",
+              "- Replacement counts are not counts of fully working mods.",
+              "- Zero reported failures does not prove gameplay compatibility.",
+              "- The notification is an overlay visible at startup, not a",
+              "  modification of the game's menu passage.",
+              "- No browser startup or gameplay testing was performed.",
+              "",
+              "## Input and output hashes",
+              "",
+              f"- Original HTML SHA256: {original_hash}",
+              f"- Merged archive SHA256: {archive_hash}",
+              f"- Patched HTML before notification SHA256: {before_badge_hash}",
+          ]
+
+          if not blocking:
+              lines.append(
+                  f'- Final HTML SHA256: {status_data["final_html_sha256"]}'
+              )
+
+          if blocking:
+              lines.extend(["", "## Blocking findings", ""])
+              lines.extend(f"- {finding}" for finding in blocking)
+
+          lines.append("")
+
+          report_path.write_text(
+              "\n".join(lines),
+              encoding="utf-8",
+          )
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          if summary:
+              with open(summary, "a", encoding="utf-8") as output:
+                  output.write(report_path.read_text(encoding="utf-8"))
+
+          print(
+              f"Patch result: {status}; "
+              f"applied={made}; failed={failed}; "
+              f"HTML changed={changed}"
+          )
+
+          if blocking:
+              raise SystemExit(
+                  "Build checks failed. See PatchReport.md."
+              )
+          '@ | Set-Content -LiteralPath 'work/check-patch.py' -Encoding utf8
+
+          python work/check-patch.py
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Patch result checks failed. Do not use this run as a successful modded build.'
+          }
+
+      - name: Upload patched game with startup notification
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CourseOfTemptation-Modded-${{ github.run_number }}
+          path: work/CourseOfTemptation.html
+          if-no-files-found: error
+
+      - name: Upload patch report and diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Merged-Mods-Patch-Diagnostics-${{ github.run_number }}
+          path: |
+            work/PatchReport.md
+            work/PatchStatus.json
+            work/PatcherAsset.txt
+            work/PatcherConsole.txt
+            work/mods/logs/**/*.txt
+          if-no-files-found: warn
