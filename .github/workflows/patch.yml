@@ -1,7 +1,12 @@
 name: Patch Course of Temptation
 
+# Run it by hand from the Actions tab (Run workflow), or push a change under mods/.
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - 'mods/**'
+      - '.github/workflows/patch.yml'
 
 permissions:
   contents: read
@@ -9,317 +14,266 @@ permissions:
 jobs:
   patch:
     runs-on: windows-latest
-    timeout-minutes: 10
-
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Download repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Prepare clean game and mods
-        id: prepare
+      - name: Start from the original HTML and collect mods
+        id: prep
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path -LiteralPath 'CourseOfTemptation.html')) { throw 'CourseOfTemptation.html not found in repository root.' }
+          if (Test-Path -LiteralPath 'work') { Remove-Item -LiteralPath 'work' -Recurse -Force }
+          New-Item -ItemType Directory -Path 'work/mods' -Force | Out-Null
+          Copy-Item -LiteralPath 'CourseOfTemptation.html' -Destination 'work/CourseOfTemptation.html'
 
-          $games = @(
-            Get-ChildItem -LiteralPath "." -File |
-            Where-Object {
-              $_.Name -ieq "CourseOfTemptation.html"
+          $srcRoot = $null
+          $zip = 'mods/mods.zip'
+          if (Test-Path -LiteralPath $zip) {
+            Write-Host "Using $zip (loose repository mods are ignored)."
+            $srcRoot = Join-Path (Get-Location) 'work/_unzipped'
+            Expand-Archive -LiteralPath $zip -DestinationPath $srcRoot -Force
+            $zipMode = $true
+          } elseif (Test-Path -LiteralPath 'mods') {
+            Write-Host 'No mods/mods.zip; using loose .mod files in mods/.'
+            $srcRoot = Join-Path (Get-Location) 'mods'
+            $zipMode = $false
+          }
+
+          $count = 0
+          if ($srcRoot) {
+            $files = Get-ChildItem -LiteralPath $srcRoot -Recurse -File |
+              Where-Object { $_.Extension -ieq '.mod' -and $_.Name -notlike '._*' -and $_.FullName -notmatch '__MACOSX' }
+            foreach ($f in $files) {
+              $rel = $f.FullName.Substring($srcRoot.Length).TrimStart('\','/')
+              # patcher only reads names ending in exactly lowercase .mod, so normalise e.g. ".Mod"
+              $rel = [IO.Path]::ChangeExtension($rel, '.mod')
+              $dest = Join-Path 'work/mods' $rel
+              New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+              if (Test-Path -LiteralPath $dest) { throw "Two mods map to the same path after normalising: $rel" }
+              Copy-Item -LiteralPath $f.FullName -Destination $dest
+              $count++
             }
-          )
-
-          if ($games.Count -ne 1) {
-            throw "Put CourseOfTemptation.html in the repository's main folder."
+            if ($zipMode -and $count -eq 0) { throw 'mods/mods.zip contains no .mod files.' }
+            if (Test-Path -LiteralPath (Join-Path 'work' '_unzipped')) { Remove-Item -LiteralPath (Join-Path 'work' '_unzipped') -Recurse -Force }
           }
+          Write-Host "Mod files collected: $count"
+          "modcount=$count" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-          New-Item -ItemType Directory -Path "work/mods" -Force |
-            Out-Null
+      - name: Download latest KittyPatcher release
+        if: steps.prep.outputs.modcount != '0'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'work/_patcher_dl' -Force | Out-Null
+          gh release download --repo "$env:GITHUB_REPOSITORY" --pattern 'KittyPatcher*.zip' --dir 'work/_patcher_dl'
+          if ($LASTEXITCODE -ne 0) { throw 'gh release download failed (is there a release marked Latest?).' }
+          $zips = @(Get-ChildItem -LiteralPath 'work/_patcher_dl' -Filter 'KittyPatcher*.zip' -File)
+          if ($zips.Count -ne 1) { throw "Latest release must contain exactly one KittyPatcher*.zip, found $($zips.Count)." }
+          Write-Host "Patcher zip: $($zips[0].Name)"
+          Expand-Archive -LiteralPath $zips[0].FullName -DestinationPath 'work/_patcher' -Force
 
-          Copy-Item -LiteralPath $games[0].FullName `
-            -Destination "work/CourseOfTemptation.html"
-
-          $modRoot = $null
-          $modZip = "mods/mods.zip"
-
-          if (Test-Path -LiteralPath $modZip -PathType Leaf) {
-            Write-Host "Extracting $modZip"
-
-            Expand-Archive `
-              -LiteralPath $modZip `
-              -DestinationPath "extracted-mods" -Force
-
-            $modRoot = (
-              Resolve-Path -LiteralPath "extracted-mods"
-            ).Path
-
-            Write-Host "Using mods from the ZIP. Loose repository mods are ignored."
-          } elseif (Test-Path -LiteralPath "mods" -PathType Container) {
-            $modRoot = (
-              Resolve-Path -LiteralPath "mods"
-            ).Path
-
-            Write-Host "No mods.zip found. Checking for loose .mod files."
+      - name: Run KittyPatcher
+        if: steps.prep.outputs.modcount != '0'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'work/_patcher').Path
+          $exe = Get-ChildItem -LiteralPath $root -File -Filter 'KittyPatcher*.exe' | Select-Object -First 1
+          if (-not $exe) {
+            $exe = Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'KittyPatcher*.exe' | Select-Object -First 1
           }
+          if (-not $exe) { throw 'No KittyPatcher*.exe found in the patcher zip.' }
+          Write-Host "Using patcher: $($exe.FullName)"
+          # keep the original file name: the patcher decides whether to open a browser from its own name
+          Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path 'work' $exe.Name)
+          Push-Location 'work'
+          try {
+            @('') | & ".\$($exe.Name)"
+            $code = $LASTEXITCODE
+          } finally { Pop-Location }
+          if ($code -ne 0) { throw "Patcher exited with code $code." }
+          Remove-Item -LiteralPath (Join-Path 'work' $exe.Name) -Force
+          Remove-Item -LiteralPath 'work/_patcher_dl','work/_patcher' -Recurse -Force
 
-          $mods = @()
+      - name: Patch report (what matched and what did not)
+        if: steps.prep.outputs.modcount != '0'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          # Patch report for KittyPatcher v0.1.x. Replays the patcher's own matching rules
+          # against the ORIGINAL html, per mod. Read-only: it never changes the game or mods.
+          import os, re, sys, collections, json
 
-          if ($null -ne $modRoot) {
-            $mods = @(
-              Get-ChildItem -LiteralPath $modRoot `
-                -Filter "*.mod" -File -Recurse
-            )
+          orig_html, mods_dir, out_md = sys.argv[1], sys.argv[2], sys.argv[3]
+          orig = open(orig_html, encoding='utf-8').read()
 
-            foreach ($mod in $mods) {
-              $relative = [System.IO.Path]::GetRelativePath(
-                $modRoot, $mod.FullName
-              )
+          def escape_twine_tags(content):
+              # same logic as KittyPatcher v0.1.2
+              import html as H
+              new_content = re.sub(r'<<(.*?)>>', r'&lt;&lt;\1&gt;&gt;', content)
+              if new_content != content:
+                  new_content = H.escape(new_content)
+                  new_content = new_content.replace('&amp;lt;', '&lt;').replace('&amp;gt;', '&gt;').replace('&#x27;', '&#39;')
+                  def un(m): return H.unescape(m.group(1)) + H.unescape(m.group(2))
+                  modified = new_content
+                  for pat in (r'(&lt;[^&]*?tw-passage)(data[^&]*?&gt;)',):
+                      for m in re.finditer(pat, new_content, flags=re.DOTALL):
+                          modified = modified.replace(m.group(0), un(m))
+                  for m in re.finditer(r'(&lt;tw-passagedata[^&]*?)(?=&gt;)', new_content, flags=re.DOTALL):
+                      modified = modified.replace(m.group(0), H.unescape(m.group(1)))
+                  return modified
+              return content
 
-              $destination = Join-Path "work/mods" $relative
-              $parent = Split-Path -Parent $destination
+          def parse(content):
+              out = []
+              for r in content.split('~~'):
+                  r = escape_twine_tags(r)
+                  if '~' in r:
+                      o, n = r.split('~', 1); out.append((o.strip(), n.strip()))
+              for r in content.split('Replace:'):
+                  r = escape_twine_tags(r)
+                  if 'With:' in r:
+                      o, n = r.split('With:', 1); out.append((o.strip(), n.strip()))
+              return out
 
-              New-Item -ItemType Directory -Path $parent -Force |
-                Out-Null
+          files, skipped, entries = [], [], []
+          for root, dirs, fs in os.walk(mods_dir):
+              if os.path.abspath(root).startswith(os.path.abspath(os.path.join(mods_dir, 'logs'))): continue
+              for f in sorted(fs):
+                  rel = os.path.relpath(os.path.join(root, f), mods_dir)
+                  if f.endswith('.mod'):
+                      files.append(rel)
+                      txt = open(os.path.join(root, f), encoding='utf-8').read()
+                      for o, n in parse(txt): entries.append((f, o, n))
+                  elif f.lower().endswith('.mod'):
+                      skipped.append(rel)
 
-              Copy-Item -LiteralPath $mod.FullName `
-                -Destination $destination
-            }
-          }
+          merged = collections.OrderedDict()
+          owners = collections.defaultdict(list)
+          for f, o, n in entries:
+              merged[o] = (f, n)
+              if f not in owners[o]: owners[o].append(f)
 
-          if (
-            (Test-Path -LiteralPath $modZip -PathType Leaf) -and
-            $mods.Count -eq 0
-          ) {
-            throw "mods/mods.zip contains no .mod files. Extract any nested ZIPs before creating your combined archive."
-          }
+          norm = lambda t: re.sub(r'(?:\s|\\n)+', '', t)
+          on = norm(orig)
+          def evidence(o):
+              if norm(o) in on: return 'same text, different whitespace/indentation'
+              lines = [norm(l) for l in o.split('\n') if norm(l)]
+              hit = [l in on for l in lines]
+              if lines and all(hit): return 'every line exists, but not together (lines added/changed between)'
+              if any(hit): return 'some lines exist, others do not (text changed)'
+              return 'no line found (removed/renamed, or unsupported syntax)'
 
-          "mod_count=$($mods.Count)" >> $env:GITHUB_OUTPUT
-          Write-Host "Found $($mods.Count) mod file(s)."
+          html = orig
+          rows = []  # (mod, target, status, detail)
+          for o, (f, n) in merged.items():
+              pat = '(' + re.escape(o).replace(r'\n', r'\s*') + ')'
+              inorig = re.search(pat, orig) is not None
+              unsup = ('Add Passage:' in n) or ('<e>' in n)
+              if re.search(pat, html):
+                  try: html = re.sub(pat, n, html)
+                  except Exception as ex: rows.append((f, o, 'ERROR', str(ex))); continue
+                  rows.append((f, o, 'applied', 'applied but contains syntax this patcher does not support' if unsup else ''))
+              elif inorig:
+                  rows.append((f, o, 'conflict', 'present in original, gone by its turn (an earlier patch changed it)'))
+              else:
+                  rows.append((f, o, 'missing', evidence(o)))
 
-      - name: Download latest patcher
-        if: steps.prepare.outputs.mod_count != '0'
+          def short(t, n=72):
+              t = t.replace('\r', '').replace('\n', ' \u23ce ')
+              t = re.sub(r'\s+', ' ', t)
+              return (t[:n] + '...') if len(t) > n else t
+          def cell(t): return t.replace('|', '\\|')
+
+          # patcher's own totals, for cross-check
+          pm = pf = None
+          lp = os.path.join(mods_dir, 'logs', 'ModPatchLog.txt')
+          if os.path.exists(lp):
+              lt = open(lp, encoding='utf-8', errors='replace').read()
+              a = re.search(r'Total replacements made: (\d+)', lt); b = re.search(r'Total replacements failed: (\d+)', lt)
+              if a: pm = int(a.group(1))
+              if b: pf = int(b.group(1))
+
+          mine_ok = sum(1 for r in rows if r[2] == 'applied'); mine_bad = len(rows) - mine_ok
+          gv = re.search(r'\.version to &quot;(v[^&]+)&quot;', orig)
+          mv = sorted(set(re.findall(r'\d+\.\d+\.\d+[a-z]?', ' '.join(os.path.dirname(x) for x in files))))
+          unsup_files = []
+          for rel in files:
+              t = open(os.path.join(mods_dir, rel), encoding='utf-8').read()
+              if re.search(r'^Add Passage:', t, re.M) or '<e>' in t: unsup_files.append(rel)
+
+          L = ['# Patch report', '',
+               f'- Game version string in HTML: **{gv.group(1) if gv else "not found"}**',
+               f'- Version-like text in mod folder names: {", ".join(mv) if mv else "none"} (a hint only, not proof)',
+               f'- Mod files read: **{len(files)}**; patch entries parsed: **{len(entries)}**; distinct targets: **{len(merged)}**',
+               f'- Replay against original HTML: **{mine_ok} applied, {mine_bad} not applied**',
+               f'- Patcher log says: {pm} made, {pf} failed' + ('  \u2705 matches replay' if (pm, pf) == (mine_ok, mine_bad) else '  \u26a0\ufe0f does NOT match replay (patcher version may differ from this report)'),
+               '']
+          if skipped:
+              L += ['## Skipped by the patcher (extension not exactly lowercase .mod)'] + [f'- {s}' for s in skipped] + ['']
+          if unsup_files:
+              L += ['## Mods using syntax KittyPatcher v0.1.2 cannot read (`Add Passage:` / `<e>`)',
+                    'Their patches either fail or insert raw text into the HTML. They need a newer patcher.'] + [f'- {s}' for s in unsup_files] + ['']
+          per = collections.defaultdict(collections.Counter)
+          for f, o, s, d in rows: per[f][s] += 1
+          L += ['## Per mod', '', '| Mod | applied | not applied |', '|---|---|---|']
+          for f in sorted(per):
+              c = per[f]; bad = sum(v for k, v in c.items() if k != 'applied')
+              L.append(f'| {cell(f)} | {c["applied"]} | {bad} |')
+          L.append('')
+          for status, title in (('missing', 'Not found in the original HTML'), ('conflict', 'Present in original but changed by an earlier patch'), ('ERROR', 'Patcher errors')):
+              sel = [r for r in rows if r[2] == status]
+              if not sel: continue
+              L += [f'## {title} ({len(sel)})', '']
+              grp = collections.defaultdict(list)
+              for f, o, s, d in sel: grp[d].append((f, o))
+              for d, items in sorted(grp.items(), key=lambda kv: -len(kv[1])):
+                  L += [f'**{d}** ({len(items)})', '']
+                  for f, o in items[:200]: L.append(f'- {cell(f)}: `{short(o).replace("`", "")}`')
+                  L.append('')
+          w = [r for r in rows if r[2] == 'applied' and r[3]]
+          if w:
+              L += [f'## Applied but suspicious ({len(w)})', ''] + [f'- {cell(f)}: `{short(o).replace("`", "")}` \u2014 {d}' for f, o, s, d in w] + ['']
+          sh = [(o, fs) for o, fs in owners.items() if len(fs) > 1]
+          if sh:
+              L += [f'## Same target patched by several mods ({len(sh)})', 'Only the last mod read keeps its replacement; the others are silently overwritten.', '']
+              L += [f'- `{short(o, 50).replace("`", "")}` \u2014 {", ".join(fs)}' for o, fs in sh] + ['']
+          open(out_md, 'w', encoding='utf-8').write('\n'.join(L))
+          print(f'report: {mine_ok} applied / {mine_bad} not applied (patcher log: {pm}/{pf})')
+          '@ | Set-Content -LiteralPath 'work/report.py' -Encoding utf8
+          python work/report.py 'CourseOfTemptation.html' 'work/mods' 'work/PatchReport.md'
+          if ($LASTEXITCODE -ne 0) { throw 'report.py failed.' }
+          Get-Content -LiteralPath 'work/PatchReport.md' -Raw | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          Remove-Item -LiteralPath 'work/report.py' -Force
+
+      - name: Add "modded build" badge to the HTML
+        if: steps.prep.outputs.modcount != '0'
+        shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
+          MODCOUNT: ${{ steps.prep.outputs.modcount }}
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
+          $path = (Resolve-Path 'work/CourseOfTemptation.html').Path
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          $text = [IO.File]::ReadAllText($path, $utf8)
+          $badge = '<div id="modded-build-badge" style="position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#222;color:#fff;font:14px/1.3 sans-serif;padding:8px 44px 8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom,0px));text-align:center;">Modded build - patcher completed with ' + $env:MODCOUNT + ' mod files. Check patch logs for unmatched patches.<button type="button" aria-label="Dismiss" onclick="this.parentNode.remove()" style="position:absolute;right:6px;top:4px;background:none;border:0;color:#fff;font-size:22px;line-height:1;padding:4px 10px;">&times;</button></div>'
+          $i = $text.LastIndexOf('</body>', [StringComparison]::Ordinal)
+          if ($i -lt 0) { throw 'No </body> found; badge not added.' }
+          $text = $text.Substring(0, $i) + $badge + $text.Substring($i)
+          [IO.File]::WriteAllText($path, $text, $utf8)
 
-          gh release download `
-            --repo "$env:GITHUB_REPOSITORY" `
-            --pattern "KittyPatcher*.zip" `
-            --dir "download"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not download KittyPatcher. Ensure the latest release contains one KittyPatcher ZIP."
-          }
-
-          $archives = @(
-            Get-ChildItem -LiteralPath "download" `
-              -Filter "*.zip" -File
-          )
-
-          if ($archives.Count -ne 1) {
-            throw "The latest release must contain exactly one matching KittyPatcher ZIP."
-          }
-
-          Write-Host "Downloaded: $($archives[0].Name)"
-
-          Expand-Archive `
-            -LiteralPath $archives[0].FullName `
-            -DestinationPath "patcher-package" -Force
-
-          $candidates = @(
-            Get-ChildItem -LiteralPath "patcher-package" `
-              -Filter "*.exe" -File -Recurse |
-            Where-Object {
-              $_.BaseName -match "^KittyPatcher(?:$|[ ._-])"
-            }
-          )
-
-          $packageRoot = (
-            Resolve-Path -LiteralPath "patcher-package"
-          ).Path
-
-          $topLevel = @(
-            $candidates |
-            Where-Object {
-              $_.DirectoryName -eq $packageRoot
-            }
-          )
-
-          if ($topLevel.Count -eq 1) {
-            $exe = $topLevel[0]
-          } elseif (
-            $topLevel.Count -eq 0 -and
-            $candidates.Count -eq 1
-          ) {
-            $exe = $candidates[0]
-          } else {
-            $candidates | ForEach-Object {
-              Write-Host $_.FullName
-            }
-
-            throw "Could not unambiguously select the patcher EXE."
-          }
-
-          Copy-Item -LiteralPath $exe.FullName `
-            -Destination (Join-Path "work" $exe.Name)
-
-          "PATCHER_NAME=$($exe.Name)" >> $env:GITHUB_ENV
-          Write-Host "Selected: $($exe.Name)"
-
-      - name: Apply mods
-        if: steps.prepare.outputs.mod_count != '0'
-        working-directory: work
-        shell: pwsh
-        timeout-minutes: 3
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $patcher = Join-Path "." $env:PATCHER_NAME
-
-          Write-Host "Running $env:PATCHER_NAME"
-          "" | & $patcher
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "KittyPatcher exited with code $LASTEXITCODE."
-          }
-
-          if (-not (Test-Path -LiteralPath "CourseOfTemptation.html")) {
-            throw "The game HTML is missing after patching."
-          }
-
-      - name: Add modded-build notice
-        if: steps.prepare.outputs.mod_count != '0'
-        env:
-          MOD_COUNT: ${{ steps.prepare.outputs.mod_count }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $path = Join-Path (
-            Get-Location
-          ).Path "work/CourseOfTemptation.html"
-
-          $html = [System.IO.File]::ReadAllText($path)
-          $count = [int]$env:MOD_COUNT
-
-          $notice = @'
-          <!-- KittyPatcher build notice -->
-          <script>
-          (() => {
-            const modCount = __MOD_COUNT__;
-
-            function showModNotice() {
-              if (document.getElementById("kitty-build-notice")) {
-                return;
-              }
-
-              const notice = document.createElement("div");
-              notice.id = "kitty-build-notice";
-              notice.setAttribute("role", "status");
-
-              notice.style.cssText =
-                "position:fixed;" +
-                "left:12px;right:12px;" +
-                "bottom:calc(12px + env(safe-area-inset-bottom, 0px));" +
-                "z-index:2147483647;" +
-                "box-sizing:border-box;" +
-                "padding:12px;" +
-                "border:1px solid #7ac98a;" +
-                "border-radius:10px;" +
-                "background:#17251c;" +
-                "color:#ffffff;" +
-                "font:14px/1.45 system-ui,sans-serif;" +
-                "box-shadow:0 3px 16px rgba(0,0,0,.4);" +
-                "display:flex;align-items:center;gap:12px;";
-
-              const text = document.createElement("span");
-              text.style.flex = "1";
-              text.textContent =
-                "Modded build - patcher completed with " +
-                modCount +
-                " mod files. Check patch logs for unmatched patches.";
-
-              const close = document.createElement("button");
-              close.type = "button";
-              close.textContent = "Dismiss";
-              close.setAttribute("aria-label", "Dismiss mod build notice");
-
-              close.style.cssText =
-                "flex-shrink:0;padding:8px 12px;" +
-                "border:1px solid #7ac98a;border-radius:6px;" +
-                "background:#263e2d;color:white;" +
-                "font:inherit;cursor:pointer;";
-
-              close.addEventListener("click", () => notice.remove());
-
-              notice.append(text, close);
-              document.body.appendChild(notice);
-            }
-
-            if (document.readyState === "loading") {
-              document.addEventListener(
-                "DOMContentLoaded",
-                showModNotice,
-                { once: true }
-              );
-            } else {
-              showModNotice();
-            }
-          })();
-          </script>
-          '@
-
-          $notice = $notice.Replace(
-            "__MOD_COUNT__", $count.ToString()
-          )
-
-          $position = $html.LastIndexOf(
-            "</body>",
-            [System.StringComparison]::OrdinalIgnoreCase
-          )
-
-          if ($position -lt 0) {
-            throw "Could not find the closing body tag to add the notice."
-          }
-
-          $html = $html.Insert($position, $notice)
-
-          [System.IO.File]::WriteAllText(
-            $path,
-            $html,
-            [System.Text.UTF8Encoding]::new($false)
-          )
-
-          Write-Host "Added modded-build notice for $count mod files."
-
-      - name: Package successful result
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          New-Item -ItemType Directory -Path "output" -Force |
-            Out-Null
-
-          Copy-Item -LiteralPath "work/CourseOfTemptation.html" `
-            -Destination "output/"
-
-          if (Test-Path -LiteralPath "work/mods/logs") {
-            Copy-Item -LiteralPath "work/mods/logs" `
-              -Destination "output/logs" -Recurse -Force
-          }
-
-      - name: Upload game and patch logs
+      - name: Upload game and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: CourseOfTemptation-game
-          path: output/
+          path: |
+            work/CourseOfTemptation.html
+            work/PatchReport.md
+            work/mods/logs/*.txt
           if-no-files-found: error
-
-      - name: Upload logs if patching failed
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: patcher-failure-logs
-          path: work/mods/logs/
-          if-no-files-found: ignore
