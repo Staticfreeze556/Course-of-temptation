@@ -92,9 +92,18 @@ jobs:
             }
           )
 
-          if ($executables.Count -ne 1) {
-            throw "Expected one KittyPatcher EXE. Inspect the ZIP contents."
-          }
+if ($executables.Count -ne 1) {
+  Write-Host "Matching KittyPatcher EXEs: $($executables.Count)"
+  Write-Host "Files extracted from the ZIP:"
+
+  Get-ChildItem -LiteralPath "patcher-package" -File -Recurse -Force |
+    ForEach-Object {
+      Write-Host $_.FullName
+    }
+
+  throw "Cannot select the patcher automatically. See the file list above."
+}
+
 
           $exe = $executables[0]
 
