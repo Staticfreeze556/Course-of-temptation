@@ -23,6 +23,7 @@ jobs:
           @'
           import collections
           import hashlib
+          import html
           import re
           import zipfile
           from pathlib import Path, PurePosixPath
@@ -33,23 +34,37 @@ jobs:
           output_dir.mkdir(exist_ok=True)
 
           if not source_zip.is_file():
-              raise SystemExit("Required source archive missing: mods/mods.zip")
+              raise SystemExit("Required archive missing: mods/mods.zip")
           if not game_path.is_file():
               raise SystemExit("Required original HTML missing: CourseOfTemptation.html")
 
           game = game_path.read_text(encoding="utf-8-sig")
-          version_match = re.search(
-              r'Config\.saves\.version\s*=\s*["\'](v[^"\']+)["\']',
-              game,
+          decoded_game = html.unescape(game)
+
+          version_pattern = (
+              r'Config\.saves\.version\s*(?:=|to)\s*'
+              r'["\'](v[^"\'\s<>]+)["\']'
           )
-          if not version_match:
-              raise SystemExit("Could not verify Config.saves.version in the HTML.")
-          version = version_match.group(1)
-          if version != "v0.8.4d":
+          versions = sorted(set(re.findall(version_pattern, decoded_game)))
+
+          if not versions:
+              excerpts = [
+                  decoded_game[max(0, m.start() - 80):m.end() + 160]
+                  for m in re.finditer(r'Config\.saves\.version', decoded_game)
+              ]
+              for excerpt in excerpts[:5]:
+                  print("Version context:", repr(excerpt))
               raise SystemExit(
-                  f"Expected original v0.8.4d HTML; found {version}. "
-                  "No output archive was created."
+                  "Could not verify Config.saves.version. "
+                  "See version context above, if present. No archive created."
               )
+
+          if versions != ["v0.8.4d"]:
+              raise SystemExit(
+                  f"Expected only v0.8.4d; found {versions}. No archive created."
+              )
+
+          print("Verified original HTML version: v0.8.4d")
 
           records = {}
           with zipfile.ZipFile(source_zip) as archive:
@@ -65,119 +80,93 @@ jobs:
                   key = name.casefold()
                   if key in records:
                       raise SystemExit(f"Duplicate archive path: {name}")
-                  records[key] = {
-                      "name": name,
-                      "data": archive.read(info),
-                  }
+                  records[key] = {"name": name, "data": archive.read(info)}
 
           mods = {}
           for key, record in records.items():
               if not record["name"].lower().endswith(".mod"):
                   continue
               raw = record["data"]
-              bom = raw.startswith(b"\xef\xbb\xbf")
-              text = raw.decode("utf-8-sig")
-              text = text.replace("\r\n", "\n")
+              text = raw.decode("utf-8-sig").replace("\r\n", "\n")
               if "\r" in text:
-                  raise SystemExit(
-                      f"Unexpected standalone CR in {record['name']}"
-                  )
+                  raise SystemExit(f"Unexpected standalone CR: {record['name']}")
               mods[key] = {
                   "record": record,
-                  "bom": bom,
+                  "bom": raw.startswith(b"\xef\xbb\xbf"),
                   "newline": "\r\n" if b"\r\n" in raw else "\n",
                   "segments": text.split("~~"),
                   "changed": False,
               }
 
           if len(mods) != 52:
-              raise SystemExit(
-                  f"Expected 52 mod files; found {len(mods)}. "
-                  "No output archive was created."
-              )
+              raise SystemExit(f"Expected 52 mod files; found {len(mods)}.")
 
           by_basename = collections.defaultdict(list)
           for key, mod in mods.items():
-              base = PurePosixPath(mod["record"]["name"]).name.casefold()
-              by_basename[base].append(key)
+              basename = PurePosixPath(mod["record"]["name"]).name.casefold()
+              by_basename[basename].append(key)
 
           def find_mod(basename):
               matches = by_basename[basename.casefold()]
               if len(matches) != 1:
-                  raise SystemExit(
-                      f"Expected one {basename}; found {len(matches)}."
-                  )
+                  raise SystemExit(f"Expected one {basename}; found {len(matches)}.")
               return matches[0]
 
           def entries():
               for key, mod in mods.items():
                   for index, segment in enumerate(mod["segments"]):
-                      if "~" not in segment:
-                          continue
-                      old, new = segment.split("~", 1)
-                      yield key, index, old.strip(), new.strip()
+                      if "~" in segment:
+                          old, new = segment.split("~", 1)
+                          yield key, index, old.strip(), new.strip()
 
           changes = []
-          used_paths = set()
+          changed_paths = set()
+          effective_targets = []
 
           def merge_target(target, basenames, new_target=None,
-                           expected_game_count=1, startup=False,
-                           helper=False):
-              expected_keys = [find_mod(name) for name in basenames]
-              found = [
-                  entry for entry in entries()
-                  if entry[2] == target
-              ]
-
+                           startup=False, helper=False):
+              expected = [find_mod(name) for name in basenames]
+              found = [entry for entry in entries() if entry[2] == target]
               counts = collections.Counter(entry[0] for entry in found)
-              if set(counts) != set(expected_keys) or any(
-                  counts[key] != 1 for key in expected_keys
+
+              if set(counts) != set(expected) or any(
+                  counts[key] != 1 for key in expected
               ):
-                  details = [
-                      mods[key]["record"]["name"] for key, _, _, _ in found
-                  ]
+                  owners = [mods[key]["record"]["name"] for key, _, _, _ in found]
                   raise SystemExit(
-                      f"Unexpected owners or duplicate entries for {target!r}: "
-                      f"{details}"
+                      f"Unexpected owners or entry counts for {target!r}: {owners}"
                   )
 
               anchor = new_target if new_target is not None else target
-              actual_count = game.count(anchor)
-              if actual_count != expected_game_count:
+              count = game.count(anchor)
+              if count != 1:
                   raise SystemExit(
-                      f"Expected {expected_game_count} original HTML matches "
-                      f"for {anchor!r}; found {actual_count}."
+                      f"Expected one original match for {anchor!r}; found {count}."
                   )
 
               lookup = {entry[0]: entry for entry in found}
               tails = []
 
-              for key in expected_keys:
+              for key in expected:
                   _, index, old, replacement = lookup[key]
                   if not replacement.startswith(old):
                       raise SystemExit(
-                          f"Replacement does not retain its anchor in "
-                          f"{mods[key]['record']['name']}: {target!r}"
+                          f"Replacement does not retain anchor: "
+                          f"{mods[key]['record']['name']}, {target!r}"
                       )
 
                   tail = replacement[len(old):].strip()
-                  if not tail:
+                  if not tail or "~" in tail:
                       raise SystemExit(
-                          f"Empty addition in {mods[key]['record']['name']}"
-                      )
-                  if "~" in tail:
-                      raise SystemExit(
-                          f"Unexpected legacy separator inside addition in "
+                          f"Empty addition or unexpected separator: "
                           f"{mods[key]['record']['name']}"
                       )
 
                   if startup:
-                      malformed = "&lt;&lt;set $pclastresidence&gt;&gt;"
-                      if malformed in tail:
-                          tail = tail.replace(
-                              malformed,
-                              '&lt;&lt;set $pclastresidence to ""&gt;&gt;',
-                          )
+                      tail = tail.replace(
+                          "&lt;&lt;set $pclastresidence&gt;&gt;",
+                          '&lt;&lt;set $pclastresidence to ""&gt;&gt;',
+                      )
 
                   if helper and tail.rstrip().endswith("},"):
                       tail = tail.rstrip()[:-1] + ";"
@@ -185,26 +174,25 @@ jobs:
                   tails.append(tail)
 
               replacement = anchor + "\n\n" + "\n\n".join(tails)
-              keeper = expected_keys[-1]
+              keeper = expected[-1]
 
-              for key in expected_keys:
+              for key in expected:
                   _, index, _, _ = lookup[key]
                   mod = mods[key]
-                  if key == keeper:
-                      mod["segments"][index] = (
-                          "\n" + anchor + "\n~\n" + replacement + "\n"
-                      )
-                  else:
-                      mod["segments"][index] = ""
+                  mod["segments"][index] = (
+                      "\n" + anchor + "\n~\n" + replacement + "\n"
+                      if key == keeper else ""
+                  )
                   mod["changed"] = True
-                  used_paths.add(mod["record"]["name"])
+                  changed_paths.add(mod["record"]["name"])
 
+              effective_targets.append(anchor)
               changes.append(
                   f"Target: {target}\n"
                   f"New anchor: {anchor}\n"
-                  f"Combined additions from: {', '.join(basenames)}\n"
+                  f"Combined: {', '.join(basenames)}\n"
                   f"Stored in: {mods[keeper]['record']['name']}\n"
-                  f"Original HTML anchor matches: {actual_count}\n"
+                  f"Original HTML matches: {count}\n"
               )
 
           trio = [
@@ -219,10 +207,7 @@ jobs:
 
           merge_target(
               "return [...new Set(inclins)];\n}",
-              [
-                  "KittyBuyOtherResidences.mod",
-                  "KittyPregnancyMod.mod",
-              ],
+              ["KittyBuyOtherResidences.mod", "KittyPregnancyMod.mod"],
               helper=True,
           )
 
@@ -230,6 +215,7 @@ jobs:
               "&lt;&lt;set $pcbirthday to setup.random_birthday()&gt;&gt;\n"
               "&lt;&lt;set $pcage to setup.minimum_pc_starting_age()&gt;&gt;"
           )
+
           merge_target(
               "&lt;&lt;set $pcage to 18&gt;&gt;",
               [
@@ -243,16 +229,9 @@ jobs:
               startup=True,
           )
 
-          merged_entries = list(entries())
-          combined_targets = [
-              "this.tattoos = {};",
-              "this.age = State.variables.pcage;",
-              "//#endregion Clothing Management",
-              "return [...new Set(inclins)];\n}",
-              startup_anchor,
-          ]
-          for target in combined_targets:
-              count = sum(old == target for _, _, old, _ in merged_entries)
+          remaining = list(entries())
+          for target in effective_targets:
+              count = sum(old == target for _, _, old, _ in remaining)
               if count != 1:
                   raise SystemExit(
                       f"Post-merge validation failed for {target!r}: {count}"
@@ -260,19 +239,18 @@ jobs:
 
           if any(
               old == "&lt;&lt;set $pcage to 18&gt;&gt;"
-              for _, _, old, _ in merged_entries
+              for _, _, old, _ in remaining
           ):
               raise SystemExit("Obsolete shared startup target remains.")
 
           for key, mod in mods.items():
               if not mod["changed"]:
                   continue
-              text = "~~".join(mod["segments"])
-              text = text.replace("\n", mod["newline"])
-              encoded = text.encode("utf-8")
+              text = "~~".join(mod["segments"]).replace("\n", mod["newline"])
+              data = text.encode("utf-8")
               if mod["bom"]:
-                  encoded = b"\xef\xbb\xbf" + encoded
-              records[key]["data"] = encoded
+                  data = b"\xef\xbb\xbf" + data
+              records[key]["data"] = data
 
           output_zip = output_dir / "mods-merged-v0.8.4d.zip"
           with zipfile.ZipFile(
@@ -287,12 +265,8 @@ jobs:
                   name.lower().endswith(".mod")
                   for name in archive.namelist()
               )
-              if count != 52:
-                  raise SystemExit(
-                      f"Output mod-file count validation failed: {count}"
-                  )
-              if archive.testzip() is not None:
-                  raise SystemExit("Output ZIP integrity check failed.")
+              if count != 52 or archive.testzip() is not None:
+                  raise SystemExit("Output ZIP validation failed.")
 
           report = [
               "Verified shared-target merge for original v0.8.4d",
@@ -302,39 +276,42 @@ jobs:
               "Five shared target groups combined.",
               "",
               "Explicit adjustments:",
-              "- Startup retains the game's calculated age.",
+              "- Startup retains the calculated starting age.",
               "- Bare pclastresidence initialization becomes an empty string.",
               "  This is an unset sentinel, not a validated hangout destination.",
-              "- The payrent function assignment's trailing comma becomes a semicolon.",
+              "- The payrent assignment's trailing comma becomes a semicolon.",
               "",
-              "NOT repaired by this helper:",
+              "NOT repaired:",
               "- Monthly rent-call whitespace mismatch.",
-              "- Rent-event registration's missing anchor.",
+              "- Missing rent-event registration anchor.",
               "- Calendar assignment/variable defect.",
               "- Rent state synchronization.",
-              "- rentals foregone / rentals foregone action mismatch.",
+              "- Mismatched rental-action strings.",
               "- Other failed residence location replacements.",
-              "- Remaining duplicate targets or other mod failures.",
+              "- Remaining shared targets and other mod failures.",
               "- Cheatplus syntax compatibility.",
               "",
-              "No gameplay or actual patcher execution was performed.",
-              "Merged archive is a diagnostic candidate, not a verified working build.",
+              "No actual patcher execution or gameplay testing performed.",
+              "This archive is a diagnostic candidate, not a verified working build.",
               "",
               f"Source ZIP SHA256: {hashlib.sha256(source_zip.read_bytes()).hexdigest()}",
               f"Original HTML SHA256: {hashlib.sha256(game_path.read_bytes()).hexdigest()}",
               "",
               "Changed files:",
+              *sorted(changed_paths),
+              "",
+              "Merged groups:",
+              "",
+              *changes,
           ]
-          report.extend(sorted(used_paths))
-          report += ["", "Merged groups:", ""]
-          report.extend(changes)
 
-          report_path = output_dir / "MergeReport.txt"
-          report_path.write_text("\n".join(report) + "\n", encoding="utf-8")
+          (output_dir / "MergeReport.txt").write_text(
+              "\n".join(report) + "\n", encoding="utf-8"
+          )
 
           print(
               f"Created candidate archive with {count} mods; "
-              f"{len(used_paths)} mod files changed; "
+              f"{len(changed_paths)} mod files changed; "
               f"{len(changes)} shared groups merged."
           )
           '@ | Set-Content -LiteralPath 'merge-conflicts.py' -Encoding utf8
