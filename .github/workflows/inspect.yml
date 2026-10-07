@@ -11,6 +11,7 @@ on:
     paths:
       - 'CourseOfTemptation.html'
       - 'scripts/inspect_mods.py'
+      - 'docs/AI-HANDOFF.md'
       - '.github/workflows/inspect.yml'
 
 permissions:
@@ -37,12 +38,37 @@ jobs:
       - name: Inspect original mods and game
         run: python scripts/inspect_mods.py
 
-      - name: Upload compatibility report and inspection data
+      - name: Include AI handoff in diagnostic bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p inspection-output
+
+          if [ ! -f docs/AI-HANDOFF.md ]; then
+            echo "::error::Missing docs/AI-HANDOFF.md. Create it before generating a complete AI diagnostic bundle."
+            exit 1
+          fi
+
+          cp docs/AI-HANDOFF.md inspection-output/AI-HANDOFF.md
+
+          {
+            echo "## AI diagnostic bundle"
+            echo ""
+            echo "- Download the Input-Compatibility-Report artifact."
+            echo "- It includes the AI handoff and any diagnostic files successfully generated."
+            echo "- Give the bundle to your AI assistant."
+            echo "- If your AI cannot read ZIP attachments, extract it and attach the files."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload AI handoff and diagnostic files together
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Input-Compatibility-Report-${{ github.run_number }}
           path: |
+            inspection-output/AI-HANDOFF.md
             inspection-output/CompatibilityReport.md
             inspection-output/InspectionData.json
           if-no-files-found: warn
