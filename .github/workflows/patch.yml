@@ -67,7 +67,7 @@ jobs:
           "mod_count=$($mods.Count)" >> $env:GITHUB_OUTPUT
           Write-Host "Found $($mods.Count) mod file(s)."
 
-      - name: Download and prepare KittyPatcher
+      - name: Download latest patcher
         if: steps.prepare.outputs.mod_count != '0'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,29 +75,64 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          gh release download "kitty-patcher" `
-            --repo "Staticfreeze556/Course-of-temptation" `
-            --pattern "KittyPatcher.v0.1.2.zip" `
+          gh release download `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --pattern "KittyPatcher*.zip" `
             --dir "download"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Could not download the patcher release attachment."
+            throw "Could not download KittyPatcher. Ensure the latest release contains one KittyPatcher ZIP."
           }
+
+          $archives = @(
+            Get-ChildItem -LiteralPath "download" `
+              -Filter "*.zip" -File
+          )
+
+          if ($archives.Count -ne 1) {
+            throw "The latest release must contain exactly one matching KittyPatcher ZIP."
+          }
+
+          Write-Host "Downloaded: $($archives[0].Name)"
 
           Expand-Archive `
-            -LiteralPath "download/KittyPatcher.v0.1.2.zip" `
+            -LiteralPath $archives[0].FullName `
             -DestinationPath "patcher-package" -Force
 
-          $patcher = "patcher-package/KittyPatcher v0.1.2.exe"
+          $candidates = @(
+            Get-ChildItem -LiteralPath "patcher-package" `
+              -Filter "*.exe" -File -Recurse |
+            Where-Object {
+              $_.BaseName -match "^KittyPatcher(?:$|[ ._-])"
+            }
+          )
 
-          if (-not (Test-Path -LiteralPath $patcher -PathType Leaf)) {
-            throw "The expected top-level KittyPatcher EXE is missing."
+          # Prefer the top-level EXE over copies inside scripts/.
+          $topLevel = @(
+            $candidates |
+            Where-Object {
+              $_.DirectoryName -eq (
+                Resolve-Path -LiteralPath "patcher-package"
+              ).Path
+            }
+          )
+
+          if ($topLevel.Count -eq 1) {
+            $exe = $topLevel[0]
+          } elseif ($topLevel.Count -eq 0 -and $candidates.Count -eq 1) {
+            $exe = $candidates[0]
+          } else {
+            $candidates | ForEach-Object {
+              Write-Host $_.FullName
+            }
+            throw "Could not unambiguously select the patcher EXE."
           }
 
-          Copy-Item -LiteralPath $patcher `
-            -Destination "work/KittyPatcher v0.1.2.exe"
+          Copy-Item -LiteralPath $exe.FullName `
+            -Destination (Join-Path "work" $exe.Name)
 
-          Write-Host "Selected the top-level KittyPatcher v0.1.2.exe."
+          "PATCHER_NAME=$($exe.Name)" >> $env:GITHUB_ENV
+          Write-Host "Selected: $($exe.Name)"
 
       - name: Apply mods
         if: steps.prepare.outputs.mod_count != '0'
@@ -107,9 +142,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "Running KittyPatcher against the clean game copy."
+          $patcher = Join-Path "." $env:PATCHER_NAME
 
-          "" | & ".\KittyPatcher v0.1.2.exe"
+          Write-Host "Running $env:PATCHER_NAME"
+          "" | & $patcher
 
           if ($LASTEXITCODE -ne 0) {
             throw "KittyPatcher exited with code $LASTEXITCODE."
