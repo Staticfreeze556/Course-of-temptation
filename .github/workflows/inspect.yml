@@ -1,0 +1,48 @@
+name: 02 - Inspect Input Compatibility
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - 01 - Prepare Input Mods
+    types:
+      - completed
+  push:
+    paths:
+      - 'CourseOfTemptation.html'
+      - 'scripts/inspect_mods.py'
+      - '.github/workflows/inspect.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inspect-input-mods-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out prepared inputs
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+
+      - name: Inspect original mods and game
+        run: python scripts/inspect_mods.py
+
+      - name: Upload compatibility report and inspection data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Input-Compatibility-Report-${{ github.run_number }}
+          path: |
+            inspection-output/CompatibilityReport.md
+            inspection-output/InspectionData.json
+          if-no-files-found: warn
