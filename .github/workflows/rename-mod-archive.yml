@@ -1,0 +1,105 @@
+name: Rename Input Archive to Mods.zip
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'input.mods/**'
+      - '.github/workflows/rename-mod-archive.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rename-input-mod-archive-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  rename:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Rename uploaded ZIP to Mods.zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import zipfile
+
+          folder = Path("input.mods")
+          target = folder / "Mods.zip"
+
+          if not folder.is_dir():
+              raise SystemExit(
+                  "Folder missing: input.mods. Upload your mod ZIP into it."
+              )
+
+          archives = sorted(
+              path for path in folder.iterdir()
+              if path.is_file() and path.suffix.lower() == ".zip"
+          )
+
+          incoming = [path for path in archives if path.name != "Mods.zip"]
+
+          if len(incoming) > 1:
+              names = ", ".join(path.name for path in incoming)
+              raise SystemExit(
+                  "Upload only one new ZIP at a time. "
+                  f"Found multiple incoming archives: {names}. "
+                  "Nothing was renamed."
+              )
+
+          if not incoming:
+              if target.is_file():
+                  if not zipfile.is_zipfile(target):
+                      raise SystemExit("input.mods/Mods.zip is not a valid ZIP.")
+                  print("Archive already named input.mods/Mods.zip.")
+              else:
+                  raise SystemExit("No ZIP archive found inside input.mods.")
+          else:
+              source = incoming[0]
+
+              if not zipfile.is_zipfile(source):
+                  raise SystemExit(
+                      f"{source.name} is not a valid ZIP. Nothing was renamed."
+                  )
+
+              with zipfile.ZipFile(source) as archive:
+                  bad = archive.testzip()
+                  if bad is not None:
+                      raise SystemExit(
+                          f"Archive integrity check failed at {bad}. "
+                          "Nothing was renamed."
+                      )
+
+              original_name = source.name
+              os.replace(source, target)
+
+              print(f"Renamed {original_name} to input.mods/Mods.zip.")
+          PY
+
+      - name: Commit the renamed archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A -- input.mods
+
+          if git diff --cached --quiet; then
+            echo "No rename needed."
+            exit 0
+          fi
+
+          git commit -m "Normalize input mod archive name to Mods.zip"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
