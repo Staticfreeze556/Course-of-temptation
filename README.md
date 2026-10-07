@@ -10,27 +10,34 @@
 3. Wait for preparation and compatibility inspection to finish.
    Download the `Input-Compatibility-Report` artifact and extract it.
 
-4. Copy `docs/AI-HANDOFF.md` and paste it into your AI chat.
-   Attach `CompatibilityReport.md` and `InspectionData.json`.
-   Provide any additional source files the AI requests.
+4. Give the AI `CompatibilityReport.md` and `InspectionData.json`.
+   Ask it to review the findings and provide complete replacement merger
+   files where changes are needed. Provide any additional files it requests.
 
-5. Update the merger using the complete replacement files provided by the AI.
+5. Update the merger using the replacement files provided by the AI.
 
-6. Manually run `03 - Merge Reviewed Mods`.
-   Review the merge report and copy the Merge Run ID from its summary.
+6. Manually start `03 - Merge and Patch Reviewed Mods`.
+   Confirm that you reviewed the inspection and enter the exact release
+   tag containing KittyPatcher.
+   Leave candidate-warning acceptance unchecked initially.
 
-7. Manually run `04 - Inspect Candidate and Patch`.
-   Enter the Merge Run ID and the release tag containing KittyPatcher.
-   If it stops with candidate warnings, download and review the report
-   before rerunning with the warning acknowledgment checked.
+7. The workflow creates `Merged_Mods.zip`, checks it, and then patches
+   a copy of the original game automatically.
 
-8. Download the `Diagnostic-Game` artifact and extract it.
-   Review the patch reports and test the generated game separately.
+8. If candidate warnings stop the workflow, download the `Patch-Reports`
+   artifact and read `CandidateInspection.md`.
+   Review the findings before starting a new build with warning acceptance
+   enabled. Blocking findings cannot be bypassed.
+
+9. After a successful build, download and extract the `Diagnostic-Game`
+   artifact. Review the patch reports and test the generated game separately.
 
 ## Important
 
 - Keep `KittyPatcher*.zip` in a repository release.
 - Keep backups of the original game and mods.
 - Updating the game or mods may require new merger rules.
+- Merging starts only when you manually run the combined workflow.
+- You do not need to download and reupload the merged archive for patching.
 - Do not replace the original repository HTML with the generated game.
 - A successful workflow does not guarantee working gameplay.
