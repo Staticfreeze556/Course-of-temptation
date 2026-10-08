@@ -18,7 +18,9 @@ Keep backups of your original game and mod archives.
 
 ---
 
-## 1. Update the original game
+## 1. Update the game and check KittyPatcher
+
+### Update the original game
 
 1. Open the repository’s **Code** tab.
 2. Select **Add file → Upload files**.
@@ -27,11 +29,43 @@ Keep backups of your original game and mod archives.
    CourseOfTemptation.html
    ```
 4. Upload it at the repository root, not inside a folder.
-5. Select **Commit changes** to save it.
+5. Select **Commit changes**.
 
 Do not use an already modded game as the original input.
 
----
+### Check or update KittyPatcher
+
+The build uses the KittyPatcher release tag you enter when starting it.
+It does not automatically select the newest patcher.
+
+If the required patcher is already available in a repository release,
+keep that release and note its exact tag.
+
+If you need to add a newer patcher:
+
+1. Obtain the intended KittyPatcher ZIP from its trusted source.
+2. Open this repository’s **Releases** page.
+3. Select **Draft a new release**.
+4. Choose a new, descriptive tag for that patcher version.
+5. Attach the patcher ZIP. Its filename must match:
+   ```text
+   KittyPatcher*.zip
+   ```
+   For example:
+   ```text
+   KittyPatcher-v0.1.2.zip
+   ```
+6. Include exactly one matching KittyPatcher ZIP in that release.
+7. Publish the release.
+8. Note the exact release tag—you will enter it in Step 6.
+
+Keep older patcher releases available so previous builds can be investigated.
+Do not upload the patcher ZIP at the repository root; that location is for
+the original mod archive.
+
+Using a newer patcher may change patch behavior. Review the resulting reports
+rather than assuming it is compatible with the current launcher and diagnostics.
+
 
 ## 2. Upload your mods
 
