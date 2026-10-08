@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   prepare:
+    name: Prepare original mod archive
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -23,7 +24,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.sha }}
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,6 +36,9 @@ jobs:
         run: python .github/scripts/prepare.py
 
       - name: Commit archive filename normalization
+        env:
+          PREPARED_BRANCH: ${{ github.ref_name }}
+          PREPARED_REF_TYPE: ${{ github.ref_type }}
         shell: bash
         run: |
           set -euo pipefail
@@ -70,22 +75,160 @@ jobs:
           if git diff --cached --quiet; then
             echo "No archive filename change to commit."
           else
+            if [ "$PREPARED_REF_TYPE" != "branch" ]; then
+              echo "::error::Archive normalization requires a branch. Run preparation on a branch rather than a tag."
+              exit 1
+            fi
+
             git commit -m "Normalize original mod archive to Mods.zip"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+
+            # Do not force-push. If the branch moved incompatibly,
+            # fail rather than overwriting another commit.
+            git push origin "HEAD:refs/heads/${PREPARED_BRANCH}"
           fi
 
-          {
-            echo "## Preparation completed"
-            echo ""
-            echo "- Prepared commit: $(git rev-parse HEAD)"
-            echo "- Input compatibility inspection runs after this workflow succeeds."
-            echo "- The final Merge + Patch build does not start automatically."
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Record exact prepared input
+        env:
+          PREPARED_BRANCH: ${{ github.ref_name }}
+          PREPARED_REF_TYPE: ${{ github.ref_type }}
+          TRIGGER_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          output = Path("preparation-output")
+          output.mkdir(parents=True, exist_ok=True)
+
+          archive = Path("Mods.zip")
+          report = output / "PreparationReport.md"
+
+          if not archive.is_file():
+              raise SystemExit(
+                  "Cannot record prepared input: Mods.zip is missing."
+              )
+
+          if not report.is_file():
+              raise SystemExit(
+                  "Cannot record prepared input: PreparationReport.md is missing."
+              )
+
+          commit = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"],
+              text=True,
+          ).strip()
+
+          dirty = subprocess.check_output(
+              ["git", "status", "--porcelain", "--untracked-files=no"],
+              text=True,
+          ).strip()
+
+          if dirty:
+              raise SystemExit(
+                  "Tracked files remain modified after preparation. "
+                  "The prepared input cannot be tied to a clean commit."
+              )
+
+          committed_archive = subprocess.check_output(
+              ["git", "show", f"{commit}:Mods.zip"]
+          )
+
+          archive_bytes = archive.read_bytes()
+          archive_hash = hashlib.sha256(archive_bytes).hexdigest()
+
+          if committed_archive != archive_bytes:
+              raise SystemExit(
+                  "Working Mods.zip does not match the recorded commit."
+              )
+
+          report_hash = hashlib.sha256(
+              report.read_bytes()
+          ).hexdigest()
+
+          trigger_commit = os.environ["TRIGGER_COMMIT"]
+
+          metadata = {
+              "schema_version": 1,
+              "status": "PREPARED",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "workflow_run_number": os.environ["GITHUB_RUN_NUMBER"],
+              "ref": os.environ["GITHUB_REF"],
+              "ref_name": os.environ["PREPARED_BRANCH"],
+              "ref_type": os.environ["PREPARED_REF_TYPE"],
+              "trigger_commit": trigger_commit,
+              "prepared_commit": commit,
+              "normalization_commit_created": commit != trigger_commit,
+              "created_at_utc": datetime.now(timezone.utc).isoformat(),
+              "archive": {
+                  "filename": archive.name,
+                  "sha256": archive_hash,
+                  "bytes": len(archive_bytes),
+              },
+              "preparation_report": {
+                  "filename": report.name,
+                  "sha256": report_hash,
+              },
+              "compatibility_verified": False,
+              "patcher_executed": False,
+              "gameplay_verified": False,
+          }
+
+          metadata_path = output / "PreparedInput.json"
+          metadata_path.write_text(
+              json.dumps(metadata, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          if summary_path:
+              with open(
+                  summary_path,
+                  "a",
+                  encoding="utf-8",
+              ) as summary:
+                  summary.write(
+                      "## Exact prepared input\n\n"
+                      f"- Trigger commit: `{trigger_commit}`\n"
+                      f"- Prepared commit: `{commit}`\n"
+                      f"- Mods.zip SHA256: `{archive_hash}`\n"
+                      f"- Mods.zip bytes: {len(archive_bytes)}\n"
+                      "- PreparedInput.json records the exact input "
+                      "for the inspection handoff.\n"
+                      "- Compatibility has not been verified.\n"
+                      "- Merge and patch remain manual-start only.\n\n"
+                  )
+
+          print(
+              f"Recorded prepared commit {commit}; "
+              f"Mods.zip SHA256 {archive_hash}."
+          )
+          PY
+
+      - name: Upload exact preparation handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: Prepared-Input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            preparation-output/PreparedInput.json
+            preparation-output/PreparationReport.md
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Upload preparation report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Input-Preparation-Report-${{ github.run_number }}
+          name: Input-Preparation-Report-${{ github.run_id }}-${{ github.run_attempt }}
           path: preparation-output/PreparationReport.md
           if-no-files-found: warn
+          retention-days: 30
