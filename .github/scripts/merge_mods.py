@@ -39,7 +39,13 @@ report = [
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kitty_escape import pre_escape_replace_blocks  # noqa: E402
+from kitty_escape import (  # noqa: E402
+    ModFormatError,
+    extract_add_passages,
+    passage_block,
+    pre_escape_replace_blocks,
+    validate_passages,
+)
 
 
 def sha(path):
@@ -408,9 +414,46 @@ def merge():
         )
 
     pre_escaped = {}
+    added_passages = []
+    inferred_blocks = []
+    passage_owners = []
 
     for key, mod in mods.items():
         text = "~~".join(mod["segments"])
+
+        if "Add Passage:" in text or "Add Javascript:" in text:
+            try:
+                text, passages, inferred = extract_add_passages(text)
+            except ModFormatError as exc:
+                fail(f"{mod['name']}: {exc}")
+            passage_owners.append(mod["name"])
+            if len(passage_owners) > 1:
+                fail(
+                    "Add Passage: found in more than one mod "
+                    f"({passage_owners}); combining insertions is not implemented."
+                )
+            errors = validate_passages(passages, game)
+            if errors:
+                fail(f"{mod['name']}: " + "; ".join(errors))
+            text += passage_block(passages)
+            for p in passages:
+                added_passages.append({
+                    "mod": mod["name"],
+                    "name": p["name"],
+                    "pid": p["pid"],
+                    "tags": p["tags"],
+                    "body_sha256": hashlib.sha256(p["body"].encode("utf-8")).hexdigest(),
+                })
+            for target in inferred:
+                inferred_blocks.append({
+                    "mod": mod["name"],
+                    "target": target[:200],
+                    "note": "r:/w: treated as Replace:/With: (inferred; owner-approved, "
+                            "not confirmed by patcher source)",
+                })
+            mod["changed"] = True
+            changed_paths.add(mod["name"])
+
         text, converted = pre_escape_replace_blocks(text)
 
         if converted:
@@ -517,6 +560,8 @@ def merge():
         },
         "merged_groups": changes,
         "pre_escaped_replace_blocks": pre_escaped,
+        "added_passages": added_passages,
+        "inferred_replace_blocks": inferred_blocks,
         "changed_files": sorted(changed_paths),
         "remaining_shared_targets": shared,
         "inspection_review": (
@@ -578,6 +623,12 @@ def merge():
         "  KittyPatcher v0.1.2 would, but without double-escaping existing",
         "  entities (works around its &quot; -> &amp;quot; conversion).",
         *[f"  - {name}: {n} blocks" for name, n in sorted(pre_escaped.items())],
+        "- Own-line <e>...</e> content escaped and marker lines removed.",
+        f"- Add Passage: sections moved out of Replace blocks and inserted before "
+        f"</tw-storydata> as {len(added_passages)} passages:",
+        *[f"  - {p['name']} (pid {p['pid']}, {p['mod']})" for p in added_passages],
+        *[f"- INFERRED r:/w: block treated as Replace:/With: in {b['mod']}: {b['target'][:80]!r}"
+          for b in inferred_blocks],
         "",
         "## Not repaired by this ruleset",
         "",
@@ -588,7 +639,6 @@ def merge():
         "- Mismatched rental-action strings.",
         "- Other failed residence location replacements.",
         "- Remaining shared targets and other mod failures.",
-        "- Cheatplus Add Passage: and <e> sections (not supported by KittyPatcher).",
         "- New findings from future inspection reports.",
         "",
         "## Remaining shared targets",

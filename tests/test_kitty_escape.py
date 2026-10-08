@@ -1,4 +1,6 @@
 """Merger pre-escape that works around KittyPatcher's entity double-escaping."""
+import json
+import re
 import subprocess
 import sys
 import zipfile
@@ -73,21 +75,106 @@ def _cheat(z):
     return name, z.read(name).decode("utf-8-sig")
 
 
+def _hits(game, text):
+    ok = 0
+    for b in text.replace("\r\n", "\n").split("Replace:"):
+        b = ref.escape_twine_tags(b)
+        if "With:" in b:
+            ok += ref.patch(game, ["Replace:" + b])[1] != []
+    return ok
+
+
 def test_real_cheatplus_blocks_now_match(merged):
     game = (ROOT / "CourseOfTemptation.html").read_text(encoding="utf-8")
     with zipfile.ZipFile(ROOT / "Mods.zip") as o, zipfile.ZipFile(merged) as c:
         _, before = _cheat(o)
         name, after = _cheat(c)
-        assert "<<" not in after and after.count("Replace:") == before.count("Replace:")
-        assert "&amp;quot;" not in after
-        def hits(t):
-            ok = 0
-            for b in t.replace("\r\n", "\n").split("Replace:"):
-                b = ref.escape_twine_tags(b)
-                if "With:" in b:
-                    ok += ref.patch(game, ["Replace:" + b])[1] != []
-            return ok
-        assert (hits(before), hits(after)) == (8, 28)
-        # all other mods untouched except the five reviewed merge groups' files
+        assert "<<" not in after and "&amp;quot;" not in after and "<e>" not in after
+        # 29 original blocks + inferred r:/w: block + passage insertion block
+        assert after.count("Replace:") == before.count("Replace:") + 2
+        assert (_hits(game, before), _hits(game, after)) == (8, 30)
         changed = {n for n in o.namelist() if n.endswith((".mod", ".Mod")) and o.read(n) != c.read(n)}
         assert name in changed and len(changed) <= 6
+
+
+EXPECTED_PASSAGES = ["Cheats+Widget", "Needs+", "m-mod-needs", "Misc+", "m-mod-time", "Teleport+",
+                     "TimeCut+", "Internet+", "Lounge+", "Arcade+", "Others+"]
+
+
+def test_real_added_passages_exist_once_and_resolve(merged):
+    game = (ROOT / "CourseOfTemptation.html").read_text(encoding="utf-8")
+    with zipfile.ZipFile(merged) as c:
+        mods = [c.read(n).decode("utf-8-sig") for n in c.namelist()
+                if n.endswith(".mod") and "__MACOSX" not in n]
+    out, _, _ = ref.patch(game, mods)
+    names = re.findall(r'<tw-passagedata [^>]*name="([^"]*)"', out)
+    bodies = dict(re.findall(r'<tw-passagedata [^>]*name="([^"]*)"[^>]*>(.*?)</tw-passagedata>', out, re.S))
+    for p in EXPECTED_PASSAGES:
+        assert names.count(p) == 1, p
+        assert not [r for r in ke.passage_references(bodies[p]) if r not in bodies], p
+    sheet = re.search(r'<style[^>]*id="twine-user-stylesheet"[^>]*>(.*?)</style>', out, re.S).group(1)
+    assert "Add Passage" not in sheet and "tw-passagedata" not in sheet
+    assert "&lt;tw-passagedata" not in out and "&lt;e&gt;" not in out
+    assert "&lt;&lt;set $qolmart to 30&gt;&gt;" in out  # inferred r:/w: block applied
+    manifest = json.loads((merged.parent / "MergeManifest.json").read_text())
+    assert [p["name"] for p in manifest["added_passages"]] == EXPECTED_PASSAGES
+    assert len(manifest["inferred_replace_blocks"]) == 1
+
+
+# --- small fixtures for Add Passage / <e> handling ---------------------------
+FIX_GAME = '<tw-storydata><tw-passagedata pid="1" name="Start" tags="" position="1,1" size="1,1">x</tw-passagedata></tw-storydata>'
+
+
+def _mod(passages, extra=""):
+    return "Replace:\nx\nWith:\ny\n\nAdd Passage:\n" + passages + extra
+
+
+P = '<tw-passagedata pid="900" name="New" tags="nobr" position="1,1" size="1,1">\n<e>\n<<set $a to "b">>\n</e>\n</tw-passagedata>\n'
+
+
+def test_add_passage_extracted_escaped_and_inserted():
+    text, ps, inferred = ke.extract_add_passages(_mod(P))
+    assert "Add Passage" not in text and inferred == []
+    assert ps[0]["name"] == "New" and ps[0]["body"] == "\n&lt;&lt;set $a to &quot;b&quot;&gt;&gt;\n"
+    assert ke.validate_passages(ps, FIX_GAME) == []
+    out, applied, failed = ref.patch(FIX_GAME, [text + ke.passage_block(ps)])
+    assert out.count('<tw-passagedata pid="900" name="New"') == 1 and out.endswith("</tw-storydata>")
+
+
+def test_conflicts_and_bad_payload_are_reported():
+    dup = P + P.replace('pid="900"', 'pid="901"')
+    _, ps, _ = ke.extract_add_passages(_mod(dup))
+    assert any("name conflict" in e for e in ke.validate_passages(ps, FIX_GAME))
+    _, ps, _ = ke.extract_add_passages(_mod(P.replace('pid="900" name="New"', 'pid="1" name="Other"')))
+    assert any("id conflict" in e for e in ke.validate_passages(ps, FIX_GAME))
+    _, ps, _ = ke.extract_add_passages(_mod(P.replace('name="New"', 'name="Start"')))
+    assert any("name conflict" in e for e in ke.validate_passages(ps, FIX_GAME))
+    _, ps, _ = ke.extract_add_passages(_mod(P.replace("b", "\\d")))
+    assert any("Backslash" in e for e in ke.validate_passages(ps, FIX_GAME))
+    assert any("exactly once" in e for e in ke.validate_passages([], FIX_GAME * 2))
+
+
+@pytest.mark.parametrize("bad", [
+    P.replace("</e>\n", ""),                       # unclosed
+    P.replace("<e>\n", "<e> inline\n"),            # inline marker
+    P.replace("\n<e>\n", "\n<b>raw</b>\n<e>\n"),   # raw markup outside <e>
+    P + "stray text\n",                           # unrecognized leftover
+])
+def test_malformed_sections_fail_loudly(bad):
+    with pytest.raises(ke.ModFormatError):
+        ke.extract_add_passages(_mod(bad))
+
+
+def test_add_javascript_is_rejected():
+    with pytest.raises(ke.ModFormatError):
+        ke.extract_add_passages("Add Javascript:\nfoo\n")
+
+
+def test_short_rw_leftover_becomes_inferred_replace_block():
+    text, _, inferred = ke.extract_add_passages(_mod(P, "\nr:\nx\nw:\n<e>\n<<set $q to 1>>\n</e>\n"))
+    assert inferred == ["x"] and "\nReplace:\nx\nWith:\n" in text
+
+
+def test_e_markers_in_replace_block_escaped_and_removed():
+    text, n = ke.pre_escape_replace_blocks("Replace:\nfoo\nWith:\n<e>\n<<set $x to \"y\">>\n</e>\n")
+    assert n == 1 and "<e>" not in text and "&lt;&lt;set $x to &quot;y&quot;&gt;&gt;" in text
