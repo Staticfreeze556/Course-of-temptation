@@ -27,4 +27,6 @@ python -m pytest -q tests
 python tools/inventory.py          # Mods.zip inventory (read-only)
 ```
 
+> **Current status:** with KittyPatcher v0.1.2, normal builds are blocked by the behavior check (backslash rewriting). Diagnostics and the AI handoff work. See [Current build status](docs/PIPELINE.md#current-build-status-as-of-run-37737991607).
+
 Docs: [PIPELINE](docs/PIPELINE.md) · [BASELINE](docs/BASELINE.md) · [INVENTORY](docs/INVENTORY.md) · [AI-HANDOFF](docs/AI-HANDOFF.md) · [CHECKPOINTS](docs/CHECKPOINTS.md)

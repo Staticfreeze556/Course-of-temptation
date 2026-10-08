@@ -33,3 +33,10 @@ To compare against a previous run: download `handoff-summary.json` from that run
 If "Merge reviewed original mods" (Linux) fails, the Windows job doesn't run and no build handoff is produced. Give the receiving AI both of these:
 1. The Inspect handoff for the same commit (artifact `AI-Handoff-Inspect-<run id>-<attempt>` on the "02 - Inspect" run).
 2. The failed merge job's log (`gh run view <run id> --log-failed`, or download it from the job page), plus `Merge-Report-<run id>-<attempt>` if it was uploaded.
+
+## Current build status (as of run 37737991607)
+- **Normal builds are blocked with the tested KittyPatcher release.** Run [37737991607](https://github.com/Staticfreeze556/Course-of-temptation/actions/runs/37737991607) (commit `b823975`) selected release `kitty-patcher` (release id 406003639), asset `KittyPatcher.v0.1.2.zip` (asset id 619346497, ZIP SHA256 `b105af5a3b73e4e4387d20e3eb67013f25a4a0b13a58a2b9a820a7a03b71d6d8`, verified against the published digest), and EXE `KittyPatcher v0.1.2.exe` (SHA256 `872051498db367f6ce74060708f38ae8703de280f0365e967f9e347f58ee752b`).
+- The behavior check found that this patcher **rewrites backslashes in replacement text** (not literal patching). The gate stopped the build before the real game was patched, as designed. **No patched game was produced.**
+- The diagnostic AI handoff was generated and uploaded despite the stop.
+- This status applies to the release identified above. A newer release is selected automatically and gets its own behavior check; this note doesn't describe it.
+- Don't weaken or bypass the gate. `accept_patcher_behavior_findings=true` produces only a build labeled diagnostic, and doing that is the owner's decision.

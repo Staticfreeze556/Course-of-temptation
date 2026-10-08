@@ -80,3 +80,8 @@ Owner clarification: KittyPatcher updates arrive as GitHub Releases, and builds 
 - Added `.github/scripts/make_handoff.py`, wired into `inspect.yml` and `merge.yml` with `if: always()`, plus `tests/test_handoff.py` (7 tests).
 - Tests: 63 passed locally. They cover normal generation, missing evidence, a blocked behavior check (reported, not bypassed), evidence reduction under a size limit with full code, a limit too small (INCOMPLETE, whole-file omission, no partial code), no baseline and with a baseline, and real inputs (complete, ≤ 600 KB, merger embedded verbatim).
 - Limitations: if the Linux merge job fails, the Windows job doesn't run and no build handoff is produced (Inspect's handoff still exists). Candidate context comes from a simple text search and is unverified. Deferred: production parser migration, automatic baseline retrieval.
+
+## Windows run 37737991607 (tested commit `b823975`)
+- Patcher: release `kitty-patcher` (id 406003639), asset `KittyPatcher.v0.1.2.zip` (id 619346497), ZIP `b105af5a…71d6d8` (published digest verified), EXE `87205149…752b`.
+- Result: required behavior checks passed. Finding: backslashes in replacement text rewritten. Build **blocked** before the real patch, and no patched game was produced. Handoff uploaded (complete). Original game and Mods.zip fingerprints unchanged.
+- Later commits `48d972f` (handoff wording, build-record labels) and later docs commits weren't exercised by this run.
