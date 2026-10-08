@@ -19,3 +19,29 @@ The bundle-file test failed before the docs were added and passes after.
 - Whether the EXE matches its bundled `.py` source is unverified (see BASELINE K1–K9).
 - No gameplay, browser or save testing.
 - The modded build is still expected to be mostly non-functional because of the 0.5.4g → 0.8.4d mismatch.
+
+## Diagnostic run 37732423437 (on Phase 1 head `c2eb933`)
+Stopped at candidate inspection because of the Windows CRLF checkout. KittyPatcher didn't run. See [DIAGNOSTIC-RUN-37732423437.md](DIAGNOSTIC-RUN-37732423437.md).
+
+## Phase 2: fixture tests and shared parsing (branch `pipeline-revamp-phase2`, PR into `pipeline-revamp`)
+
+### Changes
+- `.gitattributes`: `* -text` (byte-identical checkouts on Windows). This fixes the diagnostic-run blockers. **Not yet re-run on Windows.**
+- `tools/modkit/`: shared read-only library. `archive.py` (safe ZIP reading), `formats.py` (kitty `~`/`~~` and `Replace:`/`With:` parsers, using KittyPatcher-equivalent split and strip), `match.py` (exact-match classification, report only).
+- `tools/compat_report.py` and the generated `docs/COMPATIBILITY.md`: per-mod matrix covering all 52 mods, including cheatplus.
+- **Not changed:** the build path. The existing scripts, KittyPatcher, patch order and exact matching are untouched. modkit isn't wired into any workflow.
+
+### Tests (local): 30 passed
+- Fixtures: split and strip, `~` inside a replacement, empty and trailing segments, empty find kept for reporting, multi-block Replace/With, BOM/CRLF, `__MACOSX`/`._`, unsafe `../` path, case-insensitive duplicates, invalid UTF-8, `.Mod` flagged, unhandled `Add Passage:`/`<e>` reported, mixed-format file.
+- Real inputs: modkit's 166 kitty blocks are **identical** (file, index, find, replace) to the existing inspector's entries. Classification is identical. 11 shared targets.
+- cheatplus: 29 Replace/With blocks parsed. 24 match exactly once, 4 multiple times, 1 differs only in whitespace. It's the only mod using that format.
+- `.gitattributes` present; `COMPATIBILITY.md` is current.
+
+### Findings
+- Including cheatplus: 17 mods match fully, 13 partially (KittyPatcher would partially apply these), and 22 not at all.
+
+### Not tested / limitations
+- No Windows re-run after `.gitattributes`. This needs your approval for a second diagnostic run.
+- modkit's equivalence with `merge_mods.py` and `check_candidate.py` is by code reading, not executed comparison. Those scripts aren't migrated to modkit yet.
+- KittyPatcher behaviors K3–K9 aren't yet observed in a real run.
+- No gameplay or save testing.

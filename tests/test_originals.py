@@ -20,3 +20,16 @@ def test_game_version_is_084d():
     text = GAME.read_text(encoding="utf-8")
     assert "v0.8.4d" in text
     assert 'format-version="2.36.1"' in text
+
+
+def test_gitattributes_disables_eol_conversion():
+    from conftest import ROOT
+    lines = (ROOT / ".gitattributes").read_text().splitlines()
+    assert "* -text" in lines
+
+
+def test_compat_report_is_current():
+    import compat_report
+    from conftest import ROOT
+    assert (ROOT / "docs/COMPATIBILITY.md").read_text(encoding="utf-8") == compat_report.build(
+        ROOT / "Mods.zip", ROOT / "CourseOfTemptation.html")
