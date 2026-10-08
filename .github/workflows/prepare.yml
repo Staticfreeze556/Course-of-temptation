@@ -1,0 +1,85 @@
+name: 01 - Prepare Input Mods
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '*.zip'
+      - '*.ZIP'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-input-mods-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Validate and normalize original archive
+        run: python scripts/prepare.py
+
+      - name: Commit archive filename normalization
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          python - <<'PY'
+          import subprocess
+
+          changed = subprocess.check_output(
+              ["git", "diff", "--name-only", "-z"],
+          ).decode("utf-8").split("\0")
+
+          untracked = subprocess.check_output(
+              [
+                  "git",
+                  "ls-files",
+                  "--others",
+                  "--exclude-standard",
+                  "-z",
+              ],
+          ).decode("utf-8").split("\0")
+
+          paths = sorted({
+              path
+              for path in changed + untracked
+              if path
+              and "/" not in path
+              and path.lower().endswith(".zip")
+          })
+
+          if paths:
+              subprocess.run(
+                  ["git", "add", "-A", "--", *paths],
+                  check=True,
+              )
+          PY
+
+          if git diff --cached --quiet; then
+            echo "No archive filename change to commit."
+            exit 0
+          fi
+
+          git commit -m "Normalize original mod archive to Mods.zip"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Upload preparation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Input-Preparation-Report-${{ github.run_number }}
+          path: preparation-output/PreparationReport.md
+          if-no-files-found: warn
