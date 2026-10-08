@@ -371,6 +371,26 @@ jobs:
       - name: Inspect original mods and game
         run: python .github/scripts/inspect_mods.py
 
+      - name: Generate AI handoff (preliminary, no patcher evidence)
+        if: always() && steps.input_identity.outcome == 'success'
+        run: |
+          python .github/scripts/make_handoff.py --stage inspect \
+            --inspection-dir inspection-output \
+            --previous-summary .github/handoff-baseline.json \
+            --out CourseOfTemptation-AI-Handoff.md \
+            --summary-out handoff-summary.json
+
+      - name: Upload AI handoff
+        if: always() && steps.input_identity.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Handoff-Inspect-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            CourseOfTemptation-AI-Handoff.md
+            handoff-summary.json
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Package source and AI handoff
         if: always() && steps.input_identity.outcome == 'success'
         env:

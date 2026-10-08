@@ -418,6 +418,33 @@ jobs:
           python .github/scripts/build_record.py --out 'work/BuildRecord.json'
           if (Test-Path 'work/BuildRecord.json') { Get-Content 'work/BuildRecord.json' | Out-String | Write-Output }
 
+      - name: Generate AI handoff (build)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $handoffArgs = @('--stage', 'build',
+            '--mods-source', 'work/_candidate/Merged_Mods.zip',
+            '--candidate-report', 'work/CandidateInspection.md',
+            '--selection', 'work/_patcher/selection.json',
+            '--canary', 'work/PatcherCanary.json',
+            '--logs-dir', 'work/mods/logs',
+            '--previous-summary', '.github/handoff-baseline.json',
+            '--out', 'work/CourseOfTemptation-AI-Handoff.md',
+            '--summary-out', 'work/handoff-summary.json')
+          python .github/scripts/make_handoff.py @handoffArgs
+
+      - name: Upload AI handoff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Handoff-Build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            work/CourseOfTemptation-AI-Handoff.md
+            work/handoff-summary.json
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Upload candidate inspection and patch reports
         if: always()
         uses: actions/upload-artifact@v4

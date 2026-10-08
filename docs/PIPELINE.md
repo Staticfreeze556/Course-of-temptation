@@ -19,3 +19,12 @@ Per build, in `merge.yml`'s Windows job:
 6. **Record.** `BuildRecord.json` records the release identity, ZIP and EXE SHA256, verification mode, canary result, original game and Mods.zip hashes, candidate and per-mod hashes, log hashes, and the output HTML hash.
 
 `.github/patcher-baselines.json` holds **historical regression baselines** (v0.1.2: ZIP `b105af5a…`, EXE `87205149…`, observed output `070fd80f…` for the current inputs). A match only adds a label. It isn't a pin.
+
+## AI handoff (one file)
+- `02 Inspect` uploads `AI-Handoff-Inspect-*` containing `CourseOfTemptation-AI-Handoff.md`, which is **preliminary** because there's no patcher evidence yet, plus `handoff-summary.json`.
+- `03 Merge and Patch` uploads `AI-Handoff-Build-*` with patcher selection, behavior-check result, candidate inspection and log excerpts. Both use `if: always()`, so a handoff is produced even when a check stops the run. The check still stops the run; the handoff only reports it.
+- Content: instructions for the receiving AI, input and patcher identities, confirmed, suspected and unknown findings, deduplicated non-exact blocks with **candidate** (unverified) game context, short log excerpts, the **complete** merger and its local dependencies labeled by path, reproduction steps, and a missing/untested list.
+- Size cap: 600 KB. Evidence is reduced first. Code is never truncated. If essential code doesn't fit, whole files are omitted, listed, and the handoff is marked INCOMPLETE.
+
+### Baseline comparison (optional, manual)
+To compare against a previous run: download `handoff-summary.json` from that run's handoff artifact (Actions → run → Artifacts; artifacts expire after 90 days) and commit it as `.github/handoff-baseline.json`. Later handoffs show changes against it. Without that file, the handoff says "No comparison baseline available." There's no automatic cross-run retrieval (deferred).
