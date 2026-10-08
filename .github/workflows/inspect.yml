@@ -1,0 +1,171 @@
+name: 02 - Inspect Input Compatibility
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - 01 - Prepare Input Mods
+    types:
+      - completed
+  push:
+    paths:
+      - 'CourseOfTemptation.html'
+      - 'scripts/**'
+      - 'docs/AI-HANDOFF.md'
+      - 'README.md'
+      - '.github/workflows/inspect.yml'
+      - '.github/workflows/merge.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inspect-input-mods-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out inputs for inspection
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Inspect original mods and game
+        run: python scripts/inspect_mods.py
+
+      - name: Package source and AI handoff
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          output = Path("inspection-output")
+          output.mkdir(parents=True, exist_ok=True)
+
+          paths = [
+              "Mods.zip",
+              "CourseOfTemptation.html",
+              "README.md",
+              "docs/AI-HANDOFF.md",
+              ".github/workflows/prepare.yml",
+              ".github/workflows/inspect.yml",
+              ".github/workflows/merge.yml",
+              "scripts/prepare.py",
+              "scripts/inspect_mods.py",
+              "scripts/merge_mods.py",
+              "scripts/check_candidate.py",
+              "scripts/patch_report.py",
+          ]
+
+          included = []
+          missing = []
+
+          for name in paths:
+              source = Path(name)
+
+              if not source.is_file():
+                  missing.append(name)
+                  continue
+
+              destination_name = (
+                  "AI-HANDOFF.md"
+                  if name == "docs/AI-HANDOFF.md"
+                  else name
+              )
+              destination = output / destination_name
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(source, destination)
+
+              included.append({
+                  "source_path": name,
+                  "bundle_path": destination_name,
+                  "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                  "bytes": source.stat().st_size,
+              })
+
+          for name in ["CompatibilityReport.md", "InspectionData.json"]:
+              path = output / name
+              if path.is_file():
+                  included.append({
+                      "source_path": f"inspection-output/{name}",
+                      "bundle_path": name,
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      "bytes": path.stat().st_size,
+                  })
+              else:
+                  missing.append(f"inspection-output/{name}")
+
+          commit = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"],
+              text=True,
+          ).strip()
+
+          manifest = {
+              "schema_version": 1,
+              "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+              "checked_commit": commit,
+              "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+              "bundle_complete": not missing,
+              "included_files": included,
+              "missing_files": missing,
+              "patcher_package_included": False,
+          }
+
+          (output / "BundleManifest.json").write_text(
+              json.dumps(manifest, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(
+                      "## AI diagnostic bundle\n\n"
+                      f"- Checked commit: `{commit}`\n"
+                      f"- Bundle complete: {not missing}\n"
+                      "- Download the Input-Compatibility-Report artifact.\n"
+                      "- It contains available reports, original inputs, "
+                      "and repository source.\n"
+                      "- The KittyPatcher release package is not included.\n"
+                      "- If ZIP attachments are unsupported, extract and "
+                      "attach the required files.\n\n"
+                  )
+
+          if missing:
+              for name in missing:
+                  print(f"::error::Missing bundle file: {name}")
+              raise SystemExit("Diagnostic bundle is incomplete.")
+          PY
+
+      - name: Upload complete diagnostic bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Input-Compatibility-Report-${{ github.run_number }}
+          path: inspection-output/
+          include-hidden-files: true
+          if-no-files-found: warn
