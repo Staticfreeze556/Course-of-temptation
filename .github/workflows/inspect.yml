@@ -1,4 +1,5 @@
 name: 02 - Inspect Input Compatibility
+run-name: "Inspect compatibility — ${{ github.event.workflow_run.head_branch || github.ref_name }} — run #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
@@ -384,7 +385,7 @@ jobs:
         if: always() && steps.input_identity.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: AI-Handoff-Inspect-${{ github.run_id }}-${{ github.run_attempt }}
+          name: GIVE-TO-AI--Compatibility-Handoff
           path: |
             CourseOfTemptation-AI-Handoff.md
             handoff-summary.json
@@ -541,7 +542,9 @@ jobs:
                       f"- Input identity source: "
                       f"{manifest['input_identity_source']}\n"
                       f"- Bundle complete: {not missing}\n"
-                      "- Download the Input-Compatibility-Report artifact.\n"
+                      "- For AI help, download GIVE-TO-AI--Compatibility-Handoff.\n"
+                      "- Extract it and attach CourseOfTemptation-AI-Handoff.md.\n"
+                      "- Full-Inspection-Bundle--Optional contains supporting files.\n"
                       "- It contains available reports, original inputs, "
                       "and repository source.\n"
                       "- Automatic preparation-triggered inspections "
@@ -564,7 +567,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Input-Compatibility-Report-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Full-Inspection-Bundle--Optional
           path: inspection-output/
           include-hidden-files: true
           if-no-files-found: warn
@@ -574,7 +577,7 @@ jobs:
         if: failure() && github.event_name == 'workflow_run'
         uses: actions/upload-artifact@v4
         with:
-          name: Inspection-Handoff-Diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Preparation-Evidence--Inspection-Failed
           path: ${{ runner.temp }}/prepared-input-handoff/
           if-no-files-found: warn
           retention-days: 30
