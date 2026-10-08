@@ -19,3 +19,24 @@ Per build, in `merge.yml`'s Windows job:
 6. **Record.** `BuildRecord.json` records the release identity, ZIP and EXE SHA256, verification mode, canary result, original game and Mods.zip hashes, candidate and per-mod hashes, log hashes, and the output HTML hash.
 
 `.github/patcher-baselines.json` holds **historical regression baselines** (v0.1.2: ZIP `b105af5a…`, EXE `87205149…`, observed output `070fd80f…` for the current inputs). A match only adds a label. It isn't a pin.
+
+## AI handoff (one file)
+- `02 Inspect` uploads `AI-Handoff-Inspect-*` containing `CourseOfTemptation-AI-Handoff.md`, which is **preliminary** because there's no patcher evidence yet, plus `handoff-summary.json`.
+- `03 Merge and Patch` uploads `AI-Handoff-Build-*` with patcher selection, behavior-check result, candidate inspection and log excerpts. Both use `if: always()`, so a handoff is produced even when a check stops the run. The check still stops the run; the handoff only reports it.
+- Content: instructions for the receiving AI, input and patcher identities, confirmed, suspected and unknown findings, deduplicated non-exact blocks with **candidate** (unverified) game context, short log excerpts, the **complete** merger and its local dependencies labeled by path, reproduction steps, and a missing/untested list.
+- Size cap: 600 KB. Evidence is reduced first. Code is never truncated. If essential code doesn't fit, whole files are omitted, listed, and the handoff is marked INCOMPLETE.
+
+### Baseline comparison (optional, manual)
+To compare against a previous run: download `handoff-summary.json` from that run's handoff artifact (Actions → run → Artifacts; artifacts expire after 90 days) and commit it as `.github/handoff-baseline.json`. Later handoffs show changes against it. Without that file, the handoff says "No comparison baseline available." There's no automatic cross-run retrieval (deferred).
+
+### Known gap: Linux merge-job failure
+If "Merge reviewed original mods" (Linux) fails, the Windows job doesn't run and no build handoff is produced. Give the receiving AI both of these:
+1. The Inspect handoff for the same commit (artifact `AI-Handoff-Inspect-<run id>-<attempt>` on the "02 - Inspect" run).
+2. The failed merge job's log (`gh run view <run id> --log-failed`, or download it from the job page), plus `Merge-Report-<run id>-<attempt>` if it was uploaded.
+
+## Current build status (as of run 37737991607)
+- **Normal builds are blocked with the tested KittyPatcher release.** Run [37737991607](https://github.com/Staticfreeze556/Course-of-temptation/actions/runs/37737991607) (commit `b823975`) selected release `kitty-patcher` (release id 406003639), asset `KittyPatcher.v0.1.2.zip` (asset id 619346497, ZIP SHA256 `b105af5a3b73e4e4387d20e3eb67013f25a4a0b13a58a2b9a820a7a03b71d6d8`, verified against the published digest), and EXE `KittyPatcher v0.1.2.exe` (SHA256 `872051498db367f6ce74060708f38ae8703de280f0365e967f9e347f58ee752b`).
+- The behavior check found that this patcher **rewrites backslashes in replacement text** (not literal patching). The gate stopped the build before the real game was patched, as designed. **No patched game was produced.**
+- The diagnostic AI handoff was generated and uploaded despite the stop.
+- This status applies to the release identified above. A newer release is selected automatically and gets its own behavior check; this note doesn't describe it.
+- Don't weaken or bypass the gate. `accept_patcher_behavior_findings=true` produces only a build labeled diagnostic, and doing that is the owner's decision.
