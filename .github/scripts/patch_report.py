@@ -267,6 +267,55 @@ else:
         f"{not_applied} not applied; patcher totals unavailable."
     )
 
+# --- Added passages: verify the real patcher output -------------------------
+import json  # noqa: E402
+import sys  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kitty_escape import passage_references  # noqa: E402
+
+PATCHED = Path("work/CourseOfTemptation.html")
+CANDIDATE_MANIFEST = Path("work/_candidate/MergeManifest.json")
+passage_failures = []
+added = []
+
+if CANDIDATE_MANIFEST.is_file():
+    added = json.loads(CANDIDATE_MANIFEST.read_text(encoding="utf-8")).get("added_passages", [])
+
+report.extend(["", f"## Added passages ({len(added)})", ""])
+
+if added:
+    if not PATCHED.is_file():
+        passage_failures.append("Patched game missing; added passages not verified.")
+    else:
+        out = PATCHED.read_text(encoding="utf-8-sig")
+        bodies = dict(re.findall(
+            r'<tw-passagedata [^>]*name="([^"]*)"[^>]*>(.*?)</tw-passagedata>', out, re.S))
+        all_names = re.findall(r'<tw-passagedata [^>]*name="([^"]*)"', out)
+        sheet = re.search(r'<style[^>]*id="twine-user-stylesheet"[^>]*>(.*?)</style>', out, re.S)
+        sheet = sheet.group(1) if sheet else ""
+        for leak in ("Add Passage", "tw-passagedata", "&lt;e&gt;"):
+            if leak in sheet:
+                passage_failures.append(f"Stylesheet contains {leak!r}.")
+        if "&lt;tw-passagedata" in out:
+            passage_failures.append("Escaped <tw-passagedata> text found in the game.")
+        for p in added:
+            n = all_names.count(p["name"])
+            unresolved = sorted(
+                r for r in passage_references(bodies.get(p["name"], "")) if r not in bodies)
+            state = "ok" if n == 1 and not unresolved else "FAILED"
+            report.append(f"- {clean(p['name'])} (pid {p['pid']}): present {n}x; "
+                          f"unresolved references: {', '.join(unresolved) or 'none'} — {state}")
+            if n != 1:
+                passage_failures.append(f"{p['name']} present {n} times (expected 1).")
+            if unresolved:
+                passage_failures.append(f"{p['name']} has unresolved references {unresolved}.")
+    report.append(f"- Stylesheet free of passage payload: {not any('Stylesheet' in f for f in passage_failures)}")
+    report.append(f"- Result: {'FAILED' if passage_failures else 'all added passages verified'}")
+    report.extend(f"  - {clean(f)}" for f in passage_failures)
+else:
+    report.append("- None in the candidate manifest.")
+
 REPORT.write_text("\n".join(report) + "\n", encoding="utf-8")
 
 output_path = os.environ.get("GITHUB_OUTPUT")
@@ -289,3 +338,7 @@ print(
     f"Report written: replay {applied}/{not_applied}; "
     f"patcher totals {made}/{failed}."
 )
+
+if passage_failures:
+    print("::error::Added passage verification failed: " + "; ".join(passage_failures))
+    sys.exit(1)

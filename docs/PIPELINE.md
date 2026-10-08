@@ -40,3 +40,23 @@ If "Merge reviewed original mods" (Linux) fails, the Windows job doesn't run and
 - The diagnostic AI handoff was generated and uploaded despite the stop.
 - This status applies to the release identified above. A newer release is selected automatically and gets its own behavior check; this note doesn't describe it.
 - Don't weaken or bypass the gate. `accept_patcher_behavior_findings=true` produces only a build labeled diagnostic, and doing that is the owner's decision.
+
+## KittyPatcher entity double-escaping (merger workaround)
+- **Cause** (confirmed from the released v0.1.2 source and reproduced on Windows in run 37752710899): `escape_twine_tags` runs `html.escape` over the whole Replace:/With: block, search text included, whenever the block contains a raw `<<macro>>`. Entities already in the block (`&quot;`, `&lt;`, `&#39;`) become `&amp;quot;` and so on, so the search text no longer matches. The patcher still exits 0.
+- **Repair:** `merge_mods.py` uses `.github/scripts/kitty_escape.py` to pre-apply that same conversion, but without double-escaping existing entities. The converted blocks contain no raw `<<…>>`, so the patcher leaves them unchanged. Mod content is otherwise as authored. Converted blocks are listed under `pre_escaped_replace_blocks` in `MergeManifest.json` and in `MergeReport.md`. The original `Mods.zip` isn't modified.
+- **Effect** (simulated with the patcher's source logic against the real game): m-mod-cheatplus goes from 8 to 28 of 29 matching blocks, and no other mod changes. The remaining block differs only in indentation; it's an outdated mod line and is still reported.
+- **Regression check:** the behavior check has a required case (a mixed block, pre-escaped by the merger, must apply with the selected EXE) and records the unconverted case as profile-only.
+- **Patcher repair (not applied):** the upstream fix would replace `html.escape(new_content)` with an escape that leaves existing `&name;`/`&#n;` entities alone. That would need a rebuilt EXE and a new release, which is the owner's decision.
+
+## cheatplus Add Passage:, <e> and r:/w: (merger)
+- **Semantics** come from the public newer [KittyPatcher.py](https://raw.githubusercontent.com/GrasSlimeGaming/course-of-temptation/main/KittyPatcher.py) (`pre_proc`, `escape_html_between_tags`), a third-party copy rather than the release in use:
+  - An `Add Passage:` section runs to the next line starting with `Replace:`, `Add Passage:` or `Add Javascript:`, and is inserted before `</tw-storydata>`.
+  - Content between own-line `<e>` and `</e>` lines is HTML-escaped, and the marker lines are removed.
+- **Merger** (`kitty_escape.py`, used by `merge_mods.py`):
+  - Removes the sections from the surrounding Replace blocks and emits one `Replace: </tw-storydata>` block with the passages; their bodies are escaped, so v0.1.2 leaves them as raw passages.
+  - Applies `<e>` handling in all Replace blocks.
+  - Stops the build on name or pid conflicts (within the mod or with the game), `</tw-storydata>` not occurring exactly once, backslashes or unescaped markup in the passages, inline or unbalanced `<e>`, unrecognized section text, `Add Javascript:`, or `Add Passage:` in more than one mod.
+  - Records `added_passages` and `inferred_replace_blocks` in `MergeManifest.json`.
+- **Inferred (owner-approved, not confirmed by any patcher source):** the one `r:`/`w:` pair left inside a section is treated as `Replace:`/`With:` (cheatplus's 22 `$qol*` defaults).
+- **Post-patch check** (`patch_report.py`, on the real executable's output): each added passage must appear exactly once, with all its include, dialog and link references resolving, and there must be no passage payload in the stylesheet or anywhere as escaped text. Any failure fails the step.
+- **cheatplus now adds 11 passages:** Cheats+Widget, Needs+, m-mod-needs, Misc+, m-mod-time, Teleport+, TimeCut+, Internet+, Lounge+, Arcade+, Others+.

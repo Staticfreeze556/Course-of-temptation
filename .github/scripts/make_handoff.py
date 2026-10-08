@@ -23,6 +23,7 @@ sys.path.insert(0, str(HERE.parents[2] / "tools"))
 
 ESSENTIAL = [  # merger and its required local dependencies, in priority order
     ".github/scripts/merge_mods.py",
+    ".github/scripts/kitty_escape.py",
     ".github/scripts/check_candidate.py",
     ".github/scripts/inspect_mods.py",
     ".github/scripts/patch_report.py",

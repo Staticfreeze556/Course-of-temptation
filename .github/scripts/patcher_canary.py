@@ -14,6 +14,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kitty_escape import pre_escape_replace_blocks  # noqa: E402
+
 GAME = """<html><body>
 <p>CANARY_KITTY_A</p>
 <p>CANARY_RW_B</p>
@@ -22,6 +25,8 @@ GAME = """<html><body>
 <p>CANARY_BACKSLASH_E</p>
 <p>CANARY_MULTI_F</p><p>CANARY_MULTI_F</p>
 <p>CANARY_UPPER_G</p>
+<p>&lt;&lt;set _label to &quot;CANARY_MIX_H&quot;&gt;&gt;</p>
+<p>&lt;&lt;set _label to &quot;CANARY_MIX_I&quot;&gt;&gt;</p>
 </body></html>
 """
 
@@ -29,6 +34,16 @@ MODS = {
     # required
     "canary_required_kitty.mod": "CANARY_KITTY_A~CANARY_KITTY_A_DONE~~CANARY_MISSING_Z~SHOULD_NOT_APPEAR",
     "canary_required_rw.mod": "Replace:\nCANARY_RW_B\nWith:\nCANARY_RW_B_DONE\n",
+    # Entities and a raw <<macro>> in the SAME block. KittyPatcher v0.1.2
+    # double-escapes the entities (&quot; -> &amp;quot;) and the block fails.
+    # Required: the merger's pre-escaped form (kitty_escape) applies.
+    # Profile: the unconverted form, recorded so a fixed patcher is visible.
+    "canary_required_mixed_preescaped.mod": pre_escape_replace_blocks(
+        "Replace:\n&lt;&lt;set _label to &quot;CANARY_MIX_H&quot;&gt;&gt;\n"
+        "With:\n&lt;&lt;set _label to &quot;CANARY_MIX_H_DONE&quot;&gt;&gt;\n<<set _probe to 1>>\n")[0],
+    "canary_profile_mixed_raw.mod": (
+        "Replace:\n&lt;&lt;set _label to &quot;CANARY_MIX_I&quot;&gt;&gt;\n"
+        "With:\n&lt;&lt;set _label to &quot;CANARY_MIX_I_DONE&quot;&gt;&gt;\n<<set _probe to 2>>\n"),
     # profile
     "canary_profile_entity.mod": (
         "Replace:\n&lt;&lt;set _x to &quot;CANARY_ENTITY_D&quot;&gt;&gt;\n"
@@ -62,6 +77,8 @@ def evaluate(output_text, mods_dir):
     req["replace/with exact replacement applied"] = "CANARY_RW_B_DONE" in out
     req["missing target inserts nothing"] = "SHOULD_NOT_APPEAR" not in out
     req["untouched text preserved"] = "<p>CANARY_UNTOUCHED_C</p>" in out
+    req["mixed entity + raw macro block applies after merger pre-escape"] = (
+        "CANARY_MIX_H_DONE" in out and "&amp;quot;" not in out)
     inputs = json.loads((mods_dir.parent / "canary-inputs.json").read_text())
     req["canary mod files unchanged"] = all(
         (mods_dir / n).is_file() and sha((mods_dir / n).read_bytes()) == h
@@ -73,6 +90,8 @@ def evaluate(output_text, mods_dir):
     multi = out.count("CANARY_MULTI_F_DONE")
     prof["multi-match target: replaced occurrences (recorded only)"] = (multi, None)
     prof["uppercase .Mod file loaded (recorded only)"] = ("CANARY_UPPER_G_DONE" in out, None)
+    prof["mixed entity + raw macro block applied without pre-escape (recorded only)"] = (
+        "CANARY_MIX_I_DONE" in out, None)
     prof["output uses CRLF (recorded only)"] = ("\r\n" in output_text, None)
     findings = [k for k, (got, intended) in prof.items()
                 if intended is not None and got != intended]

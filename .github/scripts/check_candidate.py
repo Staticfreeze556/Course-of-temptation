@@ -216,6 +216,15 @@ def check():
             "Merge program hash does not match the candidate manifest."
         )
 
+    helper = Path(".github/scripts/kitty_escape.py")
+
+    if not helper.is_file():
+        blockers.append("Merge helper kitty_escape.py is missing from this checkout.")
+    elif sha(helper) != manifest.get("merge_helper_sha256"):
+        blockers.append(
+            "Merge helper hash does not match the candidate manifest."
+        )
+
     details.extend([
         f"- Build Run ID: {build_run_id}",
         f"- Checked commit: {checked_commit}",
