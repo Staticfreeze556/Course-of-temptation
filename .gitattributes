@@ -1,0 +1,4 @@
+# Store and check out every file byte-for-byte on all platforms.
+# Windows runners otherwise convert LF->CRLF, which changed the hashes of
+# CourseOfTemptation.html and merge_mods.py in run 37732423437.
+* -text
