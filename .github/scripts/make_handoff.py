@@ -303,7 +303,9 @@ def render(a, root, ev, game_text, level, budget):
     suspected.append("'Possible whitespace-only difference' blocks may be the same code reformatted. Fixing them "
                      "requires owner approval, because fuzzy or whitespace matching is not allowed.")
     unknown.append("Gameplay behavior and save compatibility: never tested.")
-    unknown.append("Whether KittyPatcher's EXE matches its bundled source (strongly indicated otherwise in run 37733625592).")
+    unknown.append("Why only 8 of 29 m-mod-cheatplus blocks applied in run 37733625592. Its log showed `&quot;` re-escaped to "
+                   "`&amp;quot;`, but the behavior check in run 37737991607 did NOT reproduce entity re-escaping. Cause unknown; "
+                   "request the cheatplus lines from that run's FailsPatchLog.txt before proposing a fix.")
     if a.stage == "inspect":
         unknown.append("Actual patcher results: not available at inspect stage.")
 

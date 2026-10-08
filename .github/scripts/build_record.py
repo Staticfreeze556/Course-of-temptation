@@ -65,7 +65,10 @@ def main():
         },
         "logs": [h(p) for p in sorted(Path("work/mods/logs").glob("*.txt"))]
         if Path("work/mods/logs").is_dir() else [],
-        "output_game": h("work/CourseOfTemptation.html"),
+        "working_game_copy": h("work/CourseOfTemptation.html"),
+        "patched": bool(canary.get("build_label") in ("normal", "diagnostic: patcher behavior findings accepted")
+                        and Path("work/mods/logs/MainPatchLog.txt").is_file()),
+        "note": "working_game_copy is the patched output only when patched is true; otherwise it is the unmodified copy.",
     }
     Path(a.out).write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
     print(f"Build record written: {a.out}")
