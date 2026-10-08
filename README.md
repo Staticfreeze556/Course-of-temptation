@@ -66,6 +66,7 @@ the original mod archive.
 Using a newer patcher may change patch behavior. Review the resulting reports
 rather than assuming it is compatible with the current launcher and diagnostics.
 
+---
 
 ## 2. Upload your mods
 
