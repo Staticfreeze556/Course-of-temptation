@@ -31,7 +31,7 @@ jobs:
           python-version: '3.12'
 
       - name: Validate and normalize original archive
-        run: python scripts/prepare.py
+        run: python .github/scripts/prepare.py
 
       - name: Commit archive filename normalization
         shell: bash
