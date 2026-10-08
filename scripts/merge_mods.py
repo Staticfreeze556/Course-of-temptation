@@ -5,7 +5,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -30,8 +29,9 @@ report = [
     "# Reviewed Mod Merge",
     "",
     f"- Ruleset: {RULESET}",
-    "- Trigger: manual only.",
-    "- Inspection review is required before starting this action.",
+    "- Build trigger: manual only.",
+    "- Input inspection must be reviewed before starting this build.",
+    "- Candidate inspection and patching follow automatically if checks allow.",
     "",
 ]
 
@@ -44,7 +44,7 @@ def write_report(status, message):
     text = "\n".join(
         report + [
             "",
-            "## Result",
+            "## Merge-stage result",
             "",
             f"- Status: {status}",
             f"- {message}",
@@ -75,10 +75,14 @@ def merge():
             path.unlink()
 
     if not SOURCE.is_file():
-        fail("Mods.zip is missing. Complete preparation and inspection first.")
+        fail(
+            "Mods.zip is missing. Complete preparation and inspection first."
+        )
 
     if not GAME.is_file():
-        fail("CourseOfTemptation.html is missing from the repository root.")
+        fail(
+            "CourseOfTemptation.html is missing from the repository root."
+        )
 
     source_hash = sha(SOURCE)
     game_hash = sha(GAME)
@@ -108,8 +112,11 @@ def merge():
 
     with zipfile.ZipFile(SOURCE) as archive:
         bad_file = archive.testzip()
+
         if bad_file is not None:
-            fail(f"Original ZIP integrity check failed at: {bad_file}")
+            fail(
+                f"Original ZIP integrity check failed at: {bad_file}"
+            )
 
         for info in archive.infolist():
             if info.is_dir():
@@ -134,7 +141,9 @@ def merge():
             key = name.casefold()
 
             if key in records:
-                fail(f"Duplicate case-insensitive archive path: {name}")
+                fail(
+                    f"Duplicate case-insensitive archive path: {name}"
+                )
 
             records[key] = {
                 "name": name,
@@ -165,7 +174,10 @@ def merge():
             "changed": False,
         }
 
-        basename = PurePosixPath(record["name"]).name.casefold()
+        basename = PurePosixPath(
+            record["name"]
+        ).name.casefold()
+
         by_basename[basename].append(key)
 
     if len(mods) != EXPECTED_MOD_COUNT:
@@ -191,10 +203,13 @@ def merge():
 
     def find_mod(basename):
         matches = by_basename[basename.casefold()]
+
         if len(matches) != 1:
             fail(
-                f"Expected exactly one {basename}; found {len(matches)}."
+                f"Expected exactly one {basename}; "
+                f"found {len(matches)}."
             )
+
         return matches[0]
 
     def entries():
@@ -211,27 +226,38 @@ def merge():
         startup=False,
         helper=False,
     ):
-        expected = [find_mod(name) for name in basenames]
+        expected = [
+            find_mod(name) for name in basenames
+        ]
+
         found = [
             entry for entry in entries()
             if entry[2] == target
         ]
-        counts = collections.Counter(entry[0] for entry in found)
+
+        counts = collections.Counter(
+            entry[0] for entry in found
+        )
 
         if (
             set(counts) != set(expected)
             or any(counts[key] != 1 for key in expected)
         ):
             owners = [
-                mods[key]["name"] for key, _, _, _ in found
+                mods[key]["name"]
+                for key, _, _, _ in found
             ]
+
             fail(
                 f"Rule ownership mismatch for {target!r}. "
                 f"Owners found: {owners}. Update this rule from the "
                 "inspection report and original source."
             )
 
-        anchor = new_target if new_target is not None else target
+        anchor = (
+            new_target if new_target is not None else target
+        )
+
         count = game.count(anchor)
 
         if count != 1:
@@ -240,7 +266,10 @@ def merge():
                 f"found {count}."
             )
 
-        lookup = {entry[0]: entry for entry in found}
+        lookup = {
+            entry[0]: entry for entry in found
+        }
+
         tails = []
 
         for key in expected:
@@ -248,7 +277,7 @@ def merge():
 
             if not replacement.startswith(old):
                 fail(
-                    f"Replacement does not retain its anchor: "
+                    "Replacement does not retain its anchor: "
                     f"{mods[key]['name']}, {target!r}"
                 )
 
@@ -256,7 +285,7 @@ def merge():
 
             if not tail or "~" in tail:
                 fail(
-                    f"Empty addition or unexpected separator in "
+                    "Empty addition or unexpected separator in "
                     f"{mods[key]['name']}."
                 )
 
@@ -271,15 +300,20 @@ def merge():
 
             tails.append(tail)
 
-        replacement = anchor + "\n\n" + "\n\n".join(tails)
+        replacement = (
+            anchor + "\n\n" + "\n\n".join(tails)
+        )
+
         keeper = expected[-1]
 
         for key in expected:
             _, index, _, _ = lookup[key]
+
             mods[key]["segments"][index] = (
                 "\n" + anchor + "\n~\n" + replacement + "\n"
                 if key == keeper else ""
             )
+
             mods[key]["changed"] = True
             changed_paths.add(mods[key]["name"])
 
@@ -299,9 +333,20 @@ def merge():
         "KittyPregnancyMod.mod",
     ]
 
-    merge_target("this.tattoos = {};", trio)
-    merge_target("this.age = State.variables.pcage;", trio)
-    merge_target("//#endregion Clothing Management", trio)
+    merge_target(
+        "this.tattoos = {};",
+        trio,
+    )
+
+    merge_target(
+        "this.age = State.variables.pcage;",
+        trio,
+    )
+
+    merge_target(
+        "//#endregion Clothing Management",
+        trio,
+    )
 
     merge_target(
         "return [...new Set(inclins)];\n}",
@@ -312,7 +357,10 @@ def merge():
         helper=True,
     )
 
-    obsolete_startup = "&lt;&lt;set $pcage to 18&gt;&gt;"
+    obsolete_startup = (
+        "&lt;&lt;set $pcage to 18&gt;&gt;"
+    )
+
     startup_anchor = (
         "&lt;&lt;set $pcbirthday to setup.random_birthday()&gt;&gt;\n"
         "&lt;&lt;set $pcage to setup.minimum_pc_starting_age()&gt;&gt;"
@@ -335,16 +383,23 @@ def merge():
 
     for target in effective_targets:
         count = sum(
-            old == target for _, _, old, _ in remaining
+            old == target
+            for _, _, old, _ in remaining
         )
+
         if count != 1:
             fail(
                 f"Post-merge validation failed for {target!r}: "
                 f"{count} surviving entries."
             )
 
-    if any(old == obsolete_startup for _, _, old, _ in remaining):
-        fail("Obsolete fixed-age startup target remains.")
+    if any(
+        old == obsolete_startup
+        for _, _, old, _ in remaining
+    ):
+        fail(
+            "Obsolete fixed-age startup target remains."
+        )
 
     for key, mod in mods.items():
         if not mod["changed"]:
@@ -366,24 +421,44 @@ def merge():
     ) as archive:
         for key in sorted(records):
             record = records[key]
-            archive.writestr(record["name"], record["data"])
+
+            archive.writestr(
+                record["name"],
+                record["data"],
+            )
 
     with zipfile.ZipFile(OUTPUT_ZIP) as archive:
         bad_file = archive.testzip()
+
         output_count = sum(
             name.lower().endswith(".mod")
             for name in archive.namelist()
         )
 
-        if bad_file is not None or output_count != EXPECTED_MOD_COUNT:
-            fail("Output ZIP integrity or mod-count validation failed.")
+        if (
+            bad_file is not None
+            or output_count != EXPECTED_MOD_COUNT
+        ):
+            fail(
+                "Output ZIP integrity or mod-count validation failed."
+            )
 
         for record in records.values():
-            if archive.read(record["name"]) != record["data"]:
-                fail(f"Output content mismatch: {record['name']}")
+            if (
+                archive.read(record["name"])
+                != record["data"]
+            ):
+                fail(
+                    f"Output content mismatch: {record['name']}"
+                )
 
-    if sha(SOURCE) != source_hash or sha(GAME) != game_hash:
-        fail("An original input unexpectedly changed during merging.")
+    if (
+        sha(SOURCE) != source_hash
+        or sha(GAME) != game_hash
+    ):
+        fail(
+            "An original input unexpectedly changed during merging."
+        )
 
     owners = collections.defaultdict(set)
 
@@ -428,15 +503,19 @@ def merge():
         "changed_files": sorted(changed_paths),
         "remaining_shared_targets": shared,
         "inspection_review": (
-            "Manual prerequisite; no inspection artifact was verified "
-            "by this program."
+            "Manual prerequisite; no inspection artifact was "
+            "verified by this program."
         ),
         "patcher_executed": False,
         "gameplay_verified": False,
     }
 
     MANIFEST_PATH.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(
+            manifest,
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n",
         encoding="utf-8",
     )
 
@@ -453,7 +532,10 @@ def merge():
         "",
         "## Changed files",
         "",
-        *[f"- {name}" for name in sorted(changed_paths)],
+        *[
+            f"- {name}"
+            for name in sorted(changed_paths)
+        ],
         "",
         "## Merged groups",
         "",
@@ -494,39 +576,60 @@ def merge():
 
     if shared:
         for item in shared:
-            target = re.sub(r"\s+", " ", item["target"])
+            target = re.sub(
+                r"\s+",
+                " ",
+                item["target"],
+            )
+
             if len(target) > 160:
                 target = target[:160] + "..."
+
             report.append(
                 f"- {target!r}: {', '.join(item['files'])}"
             )
     else:
-        report.append("- None in the parsed ~~ / ~ entries.")
+        report.append(
+            "- None in the parsed ~~ / ~ entries."
+        )
 
     report.extend([
         "",
-        "## Limitations and next step",
+        "## Review and validation limits",
         "",
-        "- This program does not retrieve the inspection report.",
-        "- Compare the input hashes with the report you reviewed.",
-        "- Matching prerequisites do not certify compatibility.",
-        "- No actual patcher execution or gameplay testing occurred.",
-        "- Review this report before manually starting candidate patching.",
-        "- Supply the merge workflow Run ID to the later patch action.",
+        "- This program does not retrieve the original inspection report.",
+        "- Compare these input hashes with the inspection you reviewed.",
+        "- Matching merge prerequisites do not certify compatibility.",
+        "- The manifest describes the candidate at the end of merging.",
+        "- Its patcher_executed value is false because patching is a later stage.",
+        "- Gameplay has not been verified.",
         "",
-        f"- Merge Run ID: {os.environ.get('GITHUB_RUN_ID', 'unknown')}",
+        "## What happens next",
+        "",
+        "- The workflow uploads Merged_Mods.zip and MergeManifest.json.",
+        "- The dependent job downloads this exact candidate artifact.",
+        "- Candidate inspection checks the manifest, hashes, and mod structure.",
+        "- Blocking findings stop patching.",
+        "- Review warnings stop patching unless acknowledged at build start.",
+        "- If checks allow it, KittyPatcher runs automatically.",
+        "- Final patch reports and the diagnostic game are separate artifacts.",
+        "- No manual Run ID entry or candidate reupload is required.",
+        "",
+        f"- Build Run ID: {os.environ.get('GITHUB_RUN_ID', 'unknown')}",
         "",
     ])
 
     write_report(
         "CANDIDATE CREATED",
-        "Merged_Mods.zip and its manifest are ready for review. "
-        "The patch action must be started separately.",
+        "Merged_Mods.zip and its manifest were created. "
+        "Candidate inspection and patching follow automatically "
+        "within this manually started build if the checks allow.",
     )
 
     print(
         f"Created {OUTPUT_ZIP.name}: "
-        f"{output_count} mods, {len(changes)} merged groups, "
+        f"{output_count} mods, "
+        f"{len(changes)} merged groups, "
         f"{len(shared)} remaining shared targets."
     )
 
@@ -537,4 +640,6 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:
-        fail(f"Merge failed: {type(exc).__name__}: {exc}")
+        fail(
+            f"Merge failed: {type(exc).__name__}: {exc}"
+        )
