@@ -94,7 +94,7 @@ def test_real_cheatplus_blocks_now_match(merged):
         assert after.count("Replace:") == before.count("Replace:") + 2
         assert (_hits(game, before), _hits(game, after)) == (8, 30)
         changed = {n for n in o.namelist() if n.endswith((".mod", ".Mod")) and o.read(n) != c.read(n)}
-        assert name in changed and len(changed) <= 6
+        assert name in changed and len(changed) <= 8  # +AdvtimeSafe, VellicorOiCheatMode targeted fixes
 
 
 EXPECTED_PASSAGES = ["Cheats+Widget", "Needs+", "m-mod-needs", "Misc+", "m-mod-time", "Teleport+",
@@ -178,3 +178,21 @@ def test_short_rw_leftover_becomes_inferred_replace_block():
 def test_e_markers_in_replace_block_escaped_and_removed():
     text, n = ke.pre_escape_replace_blocks("Replace:\nfoo\nWith:\n<e>\n<<set $x to \"y\">>\n</e>\n")
     assert n == 1 and "<e>" not in text and "&lt;&lt;set $x to &quot;y&quot;&gt;&gt;" in text
+
+
+def test_playtest_fixes_time_wrapper_and_reroll_script(merged):
+    """Fresh-game playtest: <<advtime>> called an undefined safeadvance_time,
+    and Reroll RNG had <<if>> inside <<script>>."""
+    game = (ROOT / "CourseOfTemptation.html").read_text(encoding="utf-8")
+    with zipfile.ZipFile(merged) as c:
+        texts = [c.read(n).decode("utf-8-sig") for n in c.namelist() if n.endswith(".mod")]
+    out, _, _ = ref.patch(game, texts)
+    assert out.count("setup.Time.safeadvance_time = function") == 1
+    assert out.count("setup.Time.advance_time = function(minutes)") == 1
+    assert "this.wet_clothes(minutes);" in out  # game's v0.8.4d body kept
+    assert "setup.Time.safeadvance_time(_args[0])" in out
+    i = out.index("Reroll RNG")
+    script = out[i:].split("&lt;&lt;script&gt;&gt;", 1)[1].split("&lt;&lt;/script&gt;&gt;", 1)[0]
+    assert "&lt;&lt;" not in script and "if (State.prng.isEnabled()) {" in script
+    manifest = json.loads((merged.parent / "MergeManifest.json").read_text(encoding="utf-8"))
+    assert len(manifest["targeted_fixes"]) == 2

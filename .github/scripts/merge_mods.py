@@ -48,6 +48,73 @@ from kitty_escape import (  # noqa: E402
 )
 
 
+# Targeted gameplay fixes found by a fresh-game playtest (v0.8.4d). Each is an
+# exact text substitution inside one mod; the build stops if the expected text
+# is not found exactly once, so a mod update cannot be silently mis-patched.
+TARGETED_FIXES = [
+    {
+        "mod": "AdvtimeSafe.mod",
+        "why": (
+            "AdvtimeSafe's second block searches for the pre-v0.8.4d "
+            "setup.Time.advance_time body (v0.8.4d added wet/dry clothes and "
+            "River Rat lines), so it never matched and safeadvance_time was "
+            "never defined while the advtime widget already called it. Install "
+            "the mod's own try/catch wrapper next to the game's unchanged "
+            "advance_time instead of replacing that function."
+        ),
+        "old_start": "setup.Time.advance_time = function(minutes)\n{\n    this.advance_clock(minutes);",
+        "new": (
+            "setup.Time.advance_time = function(minutes)\n{\n~\n"
+            "setup.Time.safeadvance_time = function(minutes) {\n"
+            "    try\n    {\n        setup.Time.advance_time(minutes);\n"
+            "    } catch (error) {\n"
+            "        console.log(\"An error occurred while advancing time:\", error);\n"
+            "        return null;\n    }\n};\n\n"
+            "setup.Time.advance_time = function(minutes)\n{\n"
+        ),
+        "game_anchor": "setup.Time.advance_time = function(minutes)\n{",
+    },
+    {
+        "mod": "VellicorOiCheatMode.mod",
+        "why": (
+            "The Reroll RNG button used a SugarCube <<if>> inside <<script>>, "
+            "a JavaScript syntax error. Use the JavaScript if-block the game "
+            "itself uses for its NumpadMultiply reroll shortcut."
+        ),
+        "old": (
+            "&lt;&lt;if (State.prng.isEnabled())&gt;&gt;\n"
+            "\t\t\t\t\t\t\t\t\tState.random();\n"
+            "\t\t\t\t\t\t\t\t\tconst frame = State.history[State.activeIndex];\n"
+            "\t\t\t\t\t\t\t\t\tframe.pull = State.prng.pull;\n"
+            "\t\t\t\t\t\t\t\t&lt;&lt;/if&gt;&gt;"
+        ),
+        "new": (
+            "if (State.prng.isEnabled()) {\n"
+            "\t\t\t\t\t\t\t\t\tState.random();\n"
+            "\t\t\t\t\t\t\t\t\tconst frame = State.history[State.activeIndex];\n"
+            "\t\t\t\t\t\t\t\t\tframe.pull = State.prng.pull;\n"
+            "\t\t\t\t\t\t\t\t}"
+        ),
+    },
+]
+
+
+def apply_targeted_fix(fix, text, game):
+    """Return text with one fix applied; raise ValueError when it cannot be."""
+    if "old_start" in fix:
+        if game.count(fix["game_anchor"]) != 1:
+            raise ValueError("game anchor not found exactly once")
+        segs = text.split("~~")
+        hits = [i for i, s in enumerate(segs) if s.strip().startswith(fix["old_start"])]
+        if len(hits) != 1:
+            raise ValueError(f"expected one block starting with the old body; found {len(hits)}")
+        segs[hits[0]] = "\n" + fix["new"]
+        return "~~".join(segs)
+    if text.count(fix["old"]) != 1:
+        raise ValueError(f"expected text found {text.count(fix['old'])} times")
+    return text.replace(fix["old"], fix["new"])
+
+
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -413,6 +480,20 @@ def merge():
             "Obsolete fixed-age startup target remains."
         )
 
+    applied_fixes = []
+    for fix in TARGETED_FIXES:
+        key = find_mod(fix["mod"])
+        mod = mods[key]
+        try:
+            text = apply_targeted_fix(fix, "~~".join(mod["segments"]), game)
+        except ValueError as exc:
+            fail(f"Targeted fix for {fix['mod']} no longer applies: {exc}. "
+                 "Review the mod/game version before changing this rule.")
+        mod["segments"] = text.split("~~")
+        mod["changed"] = True
+        changed_paths.add(mod["name"])
+        applied_fixes.append({"mod": mod["name"], "why": fix["why"]})
+
     pre_escaped = {}
     added_passages = []
     inferred_blocks = []
@@ -562,6 +643,7 @@ def merge():
         "pre_escaped_replace_blocks": pre_escaped,
         "added_passages": added_passages,
         "inferred_replace_blocks": inferred_blocks,
+        "targeted_fixes": applied_fixes,
         "changed_files": sorted(changed_paths),
         "remaining_shared_targets": shared,
         "inspection_review": (
@@ -629,6 +711,7 @@ def merge():
         *[f"  - {p['name']} (pid {p['pid']}, {p['mod']})" for p in added_passages],
         *[f"- INFERRED r:/w: block treated as Replace:/With: in {b['mod']}: {b['target'][:80]!r}"
           for b in inferred_blocks],
+        *[f"- Targeted fix in {f['mod']}: {f['why']}" for f in applied_fixes],
         "",
         "## Not repaired by this ruleset",
         "",
