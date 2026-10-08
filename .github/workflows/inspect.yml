@@ -10,7 +10,7 @@ on:
   push:
     paths:
       - 'CourseOfTemptation.html'
-      - 'scripts/**'
+      - '.github/scripts/**'
       - 'docs/AI-HANDOFF.md'
       - 'README.md'
       - '.github/workflows/inspect.yml'
@@ -46,7 +46,7 @@ jobs:
           python-version: '3.12'
 
       - name: Inspect original mods and game
-        run: python scripts/inspect_mods.py
+        run: python .github/scripts/inspect_mods.py
 
       - name: Package source and AI handoff
         if: always()
@@ -73,11 +73,11 @@ jobs:
               ".github/workflows/prepare.yml",
               ".github/workflows/inspect.yml",
               ".github/workflows/merge.yml",
-              "scripts/prepare.py",
-              "scripts/inspect_mods.py",
-              "scripts/merge_mods.py",
-              "scripts/check_candidate.py",
-              "scripts/patch_report.py",
+              ".github/scripts/prepare.py",
+              ".github/scripts/inspect_mods.py",
+              ".github/scripts/merge_mods.py",
+              ".github/scripts/check_candidate.py",
+              ".github/scripts/patch_report.py",
           ]
 
           included = []
