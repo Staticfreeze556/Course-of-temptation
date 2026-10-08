@@ -8,6 +8,7 @@ Hard rules (from the repository owner):
 - Don't remove or skip failing tests to get a green build.
 - Don't silently drop or partially apply mods. Every excluded mod must appear in the compatibility report with a reason.
 - Exact matching is the default. Don't add global fuzzy or whitespace matching.
-- Keep KittyPatcher v0.1.2 pinned (see PIPELINE.md). Don't replace it without comparison tests and owner approval.
+- KittyPatcher comes from the latest GitHub Release, resolved once per build (see PIPELINE.md). Don't hard-code a version. v0.1.2 is a regression baseline only. Don't replace KittyPatcher with another patcher without comparison tests and owner approval.
+- Never treat an asset without a published digest as verified. That requires the owner's explicit `approve_unverified_patcher_sha256`.
 - Builds with a changed mod set must be labeled "compatibility-unverified". Don't claim save compatibility without testing.
 - Don't change repository visibility. Don't add external services without approval.

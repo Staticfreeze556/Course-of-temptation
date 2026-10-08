@@ -16,7 +16,7 @@ from two original, never-modified inputs:
 
 1. **01 - Prepare Input Mods** (`prepare.yml`): runs on ZIP upload. Validates the archive and normalizes its name to `Mods.zip`.
 2. **02 - Inspect Input Compatibility** (`inspect.yml`): static compatibility report. Doesn't modify anything.
-3. **03 - Merge and Patch Reviewed Mods** (`merge.yml`): manual start only. Merges mods, then runs the **pinned** KittyPatcher v0.1.2 (checksum-verified) on Windows.
+3. **03 - Merge and Patch Reviewed Mods** (`merge.yml`): manual start only. Merges mods, then runs the **latest released** KittyPatcher (resolved once, digest-verified, canary-checked) on Windows.
 4. **Tests** (`tests.yml`): `pytest` on every push and PR.
 
 ## Running locally

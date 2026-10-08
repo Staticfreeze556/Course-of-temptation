@@ -1,0 +1,15 @@
+{
+  "note": "Historical regression baselines. Not a pin: builds use the latest release. A match here only adds a label.",
+  "patchers": [
+    {
+      "label": "KittyPatcher v0.1.2 (tag kitty-patcher)",
+      "asset_name": "KittyPatcher.v0.1.2.zip",
+      "zip_sha256": "b105af5a3b73e4e4387d20e3eb67013f25a4a0b13a58a2b9a820a7a03b71d6d8",
+      "exe_sha256": "872051498db367f6ce74060708f38ae8703de280f0365e967f9e347f58ee752b",
+      "observed_run": 37733625592,
+      "observed_output_sha256_for_current_inputs": "070fd80fb4c56a74cda8dda57416ef855efdd80044e0f902f0449fabe10852de",
+      "observed_totals": {"applied": 73, "failed": 105},
+      "known_canary_profile": "pending first canary run"
+    }
+  ]
+}
