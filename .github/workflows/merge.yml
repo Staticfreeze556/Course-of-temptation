@@ -1,0 +1,313 @@
+name: 03 - Merge and Patch Reviewed Mods
+
+on:
+  workflow_dispatch:
+    inputs:
+      inspection_reviewed:
+        description: 'I reviewed the current inspection and updated the merger where required.'
+        required: true
+        type: boolean
+        default: false
+      patcher_release_tag:
+        description: 'Exact release tag containing KittyPatcher*.zip.'
+        required: true
+        type: string
+      accept_static_warnings:
+        description: 'I reviewed candidate warnings and accept diagnostic patching.'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-and-patch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: Merge reviewed original mods
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    outputs:
+      candidate_artifact: ${{ steps.artifact_info.outputs.name }}
+
+    steps:
+      - name: Require review and patcher selection
+        env:
+          INSPECTION_REVIEWED: ${{ inputs.inspection_reviewed }}
+          PATCHER_RELEASE_TAG: ${{ inputs.patcher_release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$INSPECTION_REVIEWED" != "true" ]; then
+            echo "::error::Review the current inspection before starting this build."
+            exit 1
+          fi
+
+          if [ -z "${PATCHER_RELEASE_TAG//[[:space:]]/}" ]; then
+            echo "::error::Enter the exact KittyPatcher release tag."
+            exit 1
+          fi
+
+      - name: Check out selected build commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set candidate artifact name
+        id: artifact_info
+        shell: bash
+        run: |
+          echo "name=Merged-Mods-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Apply reviewed merge rules
+        run: python scripts/merge_mods.py
+
+      - name: Verify merge outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import zipfile
+          from pathlib import Path
+
+          output = Path("merge-output")
+          archive = output / "Merged_Mods.zip"
+          manifest = output / "MergeManifest.json"
+
+          if not archive.is_file() or not manifest.is_file():
+              raise SystemExit("Candidate archive or manifest is missing.")
+
+          data = json.loads(manifest.read_text(encoding="utf-8"))
+          if not isinstance(data, dict):
+              raise SystemExit("Merge manifest must contain a JSON object.")
+
+          with zipfile.ZipFile(archive) as handle:
+              bad = handle.testzip()
+              if bad is not None:
+                  raise SystemExit(f"Candidate ZIP integrity failure: {bad}")
+
+              mods = [
+                  item for item in handle.infolist()
+                  if not item.is_dir()
+                  and item.filename.lower().endswith(".mod")
+              ]
+              if not mods:
+                  raise SystemExit("Candidate contains no .mod files.")
+
+          print(f"Candidate contains {len(mods)} mod files.")
+          PY
+
+      - name: Upload candidate archive and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact_info.outputs.name }}
+          path: |
+            merge-output/Merged_Mods.zip
+            merge-output/MergeManifest.json
+          if-no-files-found: error
+
+      - name: Upload merge report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Merge-Report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: merge-output/MergeReport.md
+          if-no-files-found: warn
+
+      - name: Show continuation
+        env:
+          CANDIDATE_ARTIFACT: ${{ steps.artifact_info.outputs.name }}
+        shell: bash
+        run: |
+          {
+            echo "## Build continuation"
+            echo ""
+            echo "- Candidate artifact: $CANDIDATE_ARTIFACT"
+            echo "- Candidate inspection runs next."
+            echo "- Patching proceeds only if checks permit."
+            echo "- No separate patch workflow or Merge Run ID entry is needed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  patch:
+    name: Inspect candidate and patch game
+    needs: merge
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MERGE_RUN_ID: ${{ github.run_id }}
+      PATCHER_RELEASE_TAG: ${{ inputs.patcher_release_tag }}
+      ACCEPT_STATIC_WARNINGS: ${{ inputs.accept_static_warnings }}
+
+    steps:
+      - name: Check out the same build commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Create working folders
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'work/_candidate' -Force | Out-Null
+
+          if (Test-Path -LiteralPath 'work/mods') {
+            Remove-Item -LiteralPath 'work/mods' -Recurse -Force
+          }
+
+      - name: Download candidate from merge job
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.merge.outputs.candidate_artifact }}
+          path: work/_candidate
+
+      - name: Verify manifest and inspect candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/check_candidate.py
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Candidate checks stopped the build. Read CandidateInspection.md.'
+          }
+
+      - name: Prepare accepted mods for KittyPatcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          python - @'
+          import json
+          import shutil
+          from pathlib import Path
+
+          root = Path("work/mods")
+          staging = Path("work/_flat_mods")
+
+          if not root.is_dir():
+              raise SystemExit("Candidate checker did not create work/mods.")
+
+          mods = sorted(
+              path for path in root.rglob("*")
+              if path.is_file() and path.suffix.lower() == ".mod"
+          )
+
+          manifest = json.loads(
+              Path("work/_candidate/MergeManifest.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          if not mods or len(mods) != manifest.get("mod_count"):
+              raise SystemExit("Accepted mod count does not match the manifest.")
+
+          seen = set()
+          for path in mods:
+              key = path.name.casefold()
+              if key in seen:
+                  raise SystemExit(
+                      f"Duplicate mod basename cannot be flattened: {path.name}"
+                  )
+              seen.add(key)
+
+          if staging.exists():
+              shutil.rmtree(staging)
+          staging.mkdir(parents=True)
+
+          for path in mods:
+              shutil.copyfile(path, staging / path.name)
+
+          shutil.rmtree(root)
+          staging.rename(root)
+
+          print(f"Prepared {len(mods)} accepted mods, with one copy per mod.")
+          '@
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not prepare accepted mods for KittyPatcher.'
+          }
+
+      - name: Copy original game into working folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Copy-Item -LiteralPath 'CourseOfTemptation.html' `
+            -Destination 'work/CourseOfTemptation.html' -Force
+
+          if (-not (Test-Path -LiteralPath 'work/CourseOfTemptation.html')) {
+            throw 'Working game HTML is missing.'
+          }
+
+      - name: Download selected KittyPatcher release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          New-Item -ItemType Directory -Path 'work/_patcher_dl' -Force |
+            Out-Null
+
+          gh release download "$env:PATCHER_RELEASE_TAG" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --pattern 'KittyPatcher*.zip' `
+            --dir 'work/_patcher_dl'
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not download the selected KittyPatcher release.'
+          }
+
+          $zips = @(
+            Get-ChildItem -LiteralPath 'work/_patcher_dl' `
+              -Filter 'KittyPatcher*.zip' -File
+          )
+
+          if ($zips.Count -ne 1) {
+            throw "Expected one KittyPatcher ZIP; found $($zips.Count)."
+          }
+
+          $hash = (
+            Get-FileHash -LiteralPath $zips[0].FullName -Algorithm SHA256
+          ).Hash
+
+          @(
+            '# Patcher selection'
+            ''
+            "- Release tag: $env:PATCHER_RELEASE_TAG"
+            "- Asset: $($zips[0].Name)"
+            "- SHA256: $hash"
+            ''
+          ) | Set-Content 'work/PatcherSelection.md' -Encoding utf8
+
+          Expand-Archive -LiteralPath $zips[0].FullName `
+            -DestinationPath 'work/_patcher' -Force
+
+      - name: Run KittyPatcher
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $executables = @(
+            Get-ChildItem -LiteralPath 'work/_patcher' `
+              -Recurse -File -Filter 'KittyPatcher*.exe'
+          )
+
+          if ($executables.Count -ne 1)
