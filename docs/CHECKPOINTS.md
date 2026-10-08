@@ -41,7 +41,10 @@ Stopped at candidate inspection because of the Windows CRLF checkout. KittyPatch
 - Including cheatplus: 17 mods match fully, 13 partially (KittyPatcher would partially apply these), and 22 not at all.
 
 ### Not tested / limitations
-- No Windows re-run after `.gitattributes`. This needs your approval for a second diagnostic run.
+- Windows re-run done: see DIAGNOSTIC-RUN-37733625592.md.
 - modkit's equivalence with `merge_mods.py` and `check_candidate.py` is by code reading, not executed comparison. Those scripts aren't migrated to modkit yet.
 - KittyPatcher behaviors K3–K9 aren't yet observed in a real run.
 - No gameplay or save testing.
+
+## Diagnostic run 37733625592 (on Phase 2 head `722912e`)
+All checks passed and KittyPatcher ran: 73 applied, 105 failed. Output SHA256 `070fd80f…52de`. Diagnostic baseline: gameplay and save compatibility unverified. The EXE likely differs from its bundled source (cheatplus escaping). See [DIAGNOSTIC-RUN-37733625592.md](DIAGNOSTIC-RUN-37733625592.md).
