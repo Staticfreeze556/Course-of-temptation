@@ -13,11 +13,13 @@ on:
       - '.github/scripts/**'
       - 'docs/AI-HANDOFF.md'
       - 'README.md'
+      - '.github/workflows/prepare.yml'
       - '.github/workflows/inspect.yml'
       - '.github/workflows/merge.yml'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: inspect-input-mods-${{ github.event.workflow_run.head_branch || github.ref_name }}
@@ -25,31 +27,250 @@ concurrency:
 
 jobs:
   inspect:
+    name: Inspect exact original inputs
+
     if: >-
       github.event_name != 'workflow_run' ||
       (
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_repository.full_name == github.repository
       )
+
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
-      - name: Check out inputs for inspection
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.sha }}
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Inspect original mods and game
-        run: python .github/scripts/inspect_mods.py
+      - name: Download exact preparation handoff
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: Prepared-Input-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/prepared-input-handoff
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
 
-      - name: Package source and AI handoff
-        if: always()
+      - name: Resolve and validate inspection commit
+        id: input_identity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_COMMIT: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          PREPARATION_RUN_ID: ${{ github.event.workflow_run.id }}
+          PREPARATION_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          PREPARATION_TRIGGER_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          PREPARATION_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HANDOFF_DIR: ${{ runner.temp }}/prepared-input-handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          event_name = os.environ["EVENT_NAME"]
+          commit_pattern = r"[0-9a-f]{40}"
+          hash_pattern = r"[0-9a-f]{64}"
+
+          if event_name == "workflow_run":
+              handoff_dir = Path(os.environ["HANDOFF_DIR"])
+              metadata_path = handoff_dir / "PreparedInput.json"
+              report_path = handoff_dir / "PreparationReport.md"
+
+              if not metadata_path.is_file():
+                  raise SystemExit(
+                      "Preparation handoff is missing PreparedInput.json."
+                  )
+
+              if not report_path.is_file():
+                  raise SystemExit(
+                      "Preparation handoff is missing PreparationReport.md."
+                  )
+
+              metadata = json.loads(
+                  metadata_path.read_text(encoding="utf-8")
+              )
+
+              if not isinstance(metadata, dict):
+                  raise SystemExit(
+                      "PreparedInput.json must contain a JSON object."
+                  )
+
+              if metadata.get("schema_version") != 1:
+                  raise SystemExit(
+                      "Unsupported preparation handoff schema."
+                  )
+
+              if metadata.get("status") != "PREPARED":
+                  raise SystemExit(
+                      "Preparation handoff does not report PREPARED."
+                  )
+
+              if (
+                  metadata.get("repository")
+                  != os.environ["EXPECTED_REPOSITORY"]
+              ):
+                  raise SystemExit(
+                      "Preparation handoff repository does not match."
+                  )
+
+              if (
+                  str(metadata.get("workflow_run_id"))
+                  != os.environ["PREPARATION_RUN_ID"]
+              ):
+                  raise SystemExit(
+                      "Preparation handoff belongs to another run."
+                  )
+
+              if (
+                  str(metadata.get("workflow_run_attempt"))
+                  != os.environ["PREPARATION_RUN_ATTEMPT"]
+              ):
+                  raise SystemExit(
+                      "Preparation handoff belongs to another run attempt."
+                  )
+
+              trigger_commit = metadata.get("trigger_commit")
+
+              if (
+                  not isinstance(trigger_commit, str)
+                  or not re.fullmatch(commit_pattern, trigger_commit)
+              ):
+                  raise SystemExit(
+                      "Preparation handoff has an invalid trigger commit."
+                  )
+
+              if (
+                  trigger_commit
+                  != os.environ["PREPARATION_TRIGGER_COMMIT"]
+              ):
+                  raise SystemExit(
+                      "Preparation trigger commit does not match "
+                      "the workflow_run event."
+                  )
+
+              if (
+                  metadata.get("ref_name")
+                  != os.environ["PREPARATION_BRANCH"]
+              ):
+                  raise SystemExit(
+                      "Preparation branch does not match "
+                      "the workflow_run event."
+                  )
+
+              commit = metadata.get("prepared_commit")
+
+              if (
+                  not isinstance(commit, str)
+                  or not re.fullmatch(commit_pattern, commit)
+              ):
+                  raise SystemExit(
+                      "Preparation handoff has an invalid prepared commit."
+                  )
+
+              archive = metadata.get("archive")
+
+              if not isinstance(archive, dict):
+                  raise SystemExit(
+                      "Preparation archive record must be an object."
+                  )
+
+              if archive.get("filename") != "Mods.zip":
+                  raise SystemExit(
+                      "Preparation archive filename must be Mods.zip."
+                  )
+
+              archive_hash = archive.get("sha256")
+
+              if (
+                  not isinstance(archive_hash, str)
+                  or not re.fullmatch(hash_pattern, archive_hash)
+              ):
+                  raise SystemExit(
+                      "Preparation archive SHA256 is invalid."
+                  )
+
+              archive_size = archive.get("bytes")
+
+              if (
+                  type(archive_size) is not int
+                  or archive_size <= 0
+              ):
+                  raise SystemExit(
+                      "Preparation archive byte count is invalid."
+                  )
+
+              report_info = metadata.get("preparation_report")
+
+              if not isinstance(report_info, dict):
+                  raise SystemExit(
+                      "Preparation report record must be an object."
+                  )
+
+              if (
+                  report_info.get("filename")
+                  != "PreparationReport.md"
+              ):
+                  raise SystemExit(
+                      "Unexpected preparation report filename."
+                  )
+
+              report_hash = hashlib.sha256(
+                  report_path.read_bytes()
+              ).hexdigest()
+
+              if report_hash != report_info.get("sha256"):
+                  raise SystemExit(
+                      "Preparation report hash does not match the handoff."
+                  )
+
+              identity_source = "preparation_handoff"
+
+          else:
+              commit = os.environ["TRIGGER_COMMIT"]
+
+              if not re.fullmatch(commit_pattern, commit):
+                  raise SystemExit(
+                      "The triggering commit SHA is invalid."
+                  )
+
+              identity_source = "event_commit"
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+              encoding="utf-8",
+          ) as output:
+              output.write(f"commit={commit}\n")
+              output.write(f"identity_source={identity_source}\n")
+
+          print(
+              f"Inspection commit resolved to {commit} "
+              f"using {identity_source}."
+          )
+          PY
+
+      - name: Check out exact inputs for inspection
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.input_identity.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked-out prepared archive
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_COMMIT: ${{ steps.input_identity.outputs.commit }}
+          HANDOFF_DIR: ${{ runner.temp }}/prepared-input-handoff
         shell: bash
         run: |
           set -euo pipefail
@@ -61,6 +282,125 @@ jobs:
           import shutil
           import subprocess
           from pathlib import Path
+
+          checked_commit = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"],
+              text=True,
+          ).strip()
+
+          if checked_commit != os.environ["EXPECTED_COMMIT"]:
+              raise SystemExit(
+                  "Checkout does not match the resolved inspection commit."
+              )
+
+          output = Path("inspection-output")
+          output.mkdir(parents=True, exist_ok=True)
+
+          if os.environ["EVENT_NAME"] == "workflow_run":
+              handoff_dir = Path(os.environ["HANDOFF_DIR"])
+
+              metadata = json.loads(
+                  (handoff_dir / "PreparedInput.json").read_text(
+                      encoding="utf-8"
+                  )
+              )
+
+              archive_path = Path("Mods.zip")
+
+              if not archive_path.is_file():
+                  raise SystemExit(
+                      "Prepared commit does not contain Mods.zip."
+                  )
+
+              archive_bytes = archive_path.read_bytes()
+              archive_hash = hashlib.sha256(
+                  archive_bytes
+              ).hexdigest()
+
+              expected_archive = metadata["archive"]
+
+              if archive_hash != expected_archive["sha256"]:
+                  raise SystemExit(
+                      "Checked-out Mods.zip SHA256 does not match "
+                      "the preparation handoff."
+                  )
+
+              if len(archive_bytes) != expected_archive["bytes"]:
+                  raise SystemExit(
+                      "Checked-out Mods.zip byte count does not match "
+                      "the preparation handoff."
+                  )
+
+              for name in (
+                  "PreparedInput.json",
+                  "PreparationReport.md",
+              ):
+                  shutil.copyfile(
+                      handoff_dir / name,
+                      output / name,
+                  )
+
+              message = (
+                  "Exact prepared commit and Mods.zip hash verified."
+              )
+
+          else:
+              message = (
+                  "Exact event commit checked out. "
+                  "No preparation handoff was required for this trigger."
+              )
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          if summary_path:
+              with open(
+                  summary_path,
+                  "a",
+                  encoding="utf-8",
+              ) as summary:
+                  summary.write(
+                      "## Inspection input identity\n\n"
+                      f"- Checked commit: `{checked_commit}`\n"
+                      f"- Trigger: {os.environ['EVENT_NAME']}\n"
+                      f"- {message}\n\n"
+                  )
+
+          print(message)
+          PY
+
+      - name: Inspect original mods and game
+        run: python .github/scripts/inspect_mods.py
+
+      - name: Package source and AI handoff
+        if: always() && steps.input_identity.outcome == 'success'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_COMMIT: ${{ steps.input_identity.outputs.commit }}
+          INPUT_IDENTITY_SOURCE: ${{ steps.input_identity.outputs.identity_source }}
+          PREPARATION_RUN_ID: ${{ github.event.workflow_run.id }}
+          PREPARATION_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          commit = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"],
+              text=True,
+          ).strip()
+
+          if commit != os.environ["EXPECTED_COMMIT"]:
+              raise SystemExit(
+                  "Cannot package bundle: checkout does not match "
+                  "the resolved inspection commit."
+              )
 
           output = Path("inspection-output")
           output.mkdir(parents=True, exist_ok=True)
@@ -95,6 +435,7 @@ jobs:
                   if name == "docs/AI-HANDOFF.md"
                   else name
               )
+
               destination = output / destination_name
               destination.parent.mkdir(parents=True, exist_ok=True)
               shutil.copyfile(source, destination)
@@ -102,33 +443,59 @@ jobs:
               included.append({
                   "source_path": name,
                   "bundle_path": destination_name,
-                  "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                  "sha256": hashlib.sha256(
+                      source.read_bytes()
+                  ).hexdigest(),
                   "bytes": source.stat().st_size,
               })
 
-          for name in ["CompatibilityReport.md", "InspectionData.json"]:
-              path = output / name
-              if path.is_file():
-                  included.append({
-                      "source_path": f"inspection-output/{name}",
-                      "bundle_path": name,
-                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                      "bytes": path.stat().st_size,
-                  })
-              else:
-                  missing.append(f"inspection-output/{name}")
+          generated_files = [
+              "CompatibilityReport.md",
+              "InspectionData.json",
+          ]
 
-          commit = subprocess.check_output(
-              ["git", "rev-parse", "HEAD"],
-              text=True,
-          ).strip()
+          if os.environ["EVENT_NAME"] == "workflow_run":
+              generated_files.extend([
+                  "PreparedInput.json",
+                  "PreparationReport.md",
+              ])
+
+          for name in generated_files:
+              path = output / name
+
+              if not path.is_file():
+                  missing.append(f"inspection-output/{name}")
+                  continue
+
+              included.append({
+                  "source_path": f"inspection-output/{name}",
+                  "bundle_path": name,
+                  "sha256": hashlib.sha256(
+                      path.read_bytes()
+                  ).hexdigest(),
+                  "bytes": path.stat().st_size,
+              })
 
           manifest = {
               "schema_version": 1,
-              "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+              "repository": os.environ["GITHUB_REPOSITORY"],
               "checked_commit": commit,
-              "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
-              "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "event_name": os.environ["EVENT_NAME"],
+              "input_identity_source": os.environ[
+                  "INPUT_IDENTITY_SOURCE"
+              ],
+              "preparation_workflow_run_id": (
+                  os.environ["PREPARATION_RUN_ID"]
+                  if os.environ["EVENT_NAME"] == "workflow_run"
+                  else None
+              ),
+              "preparation_workflow_run_attempt": (
+                  os.environ["PREPARATION_RUN_ATTEMPT"]
+                  if os.environ["EVENT_NAME"] == "workflow_run"
+                  else None
+              ),
               "bundle_complete": not missing,
               "included_files": included,
               "missing_files": missing,
@@ -140,32 +507,54 @@ jobs:
               encoding="utf-8",
           )
 
-          summary = os.environ.get("GITHUB_STEP_SUMMARY")
-          if summary:
-              with open(summary, "a", encoding="utf-8") as handle:
-                  handle.write(
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          if summary_path:
+              with open(
+                  summary_path,
+                  "a",
+                  encoding="utf-8",
+              ) as summary:
+                  summary.write(
                       "## AI diagnostic bundle\n\n"
                       f"- Checked commit: `{commit}`\n"
+                      f"- Input identity source: "
+                      f"{manifest['input_identity_source']}\n"
                       f"- Bundle complete: {not missing}\n"
                       "- Download the Input-Compatibility-Report artifact.\n"
                       "- It contains available reports, original inputs, "
                       "and repository source.\n"
+                      "- Automatic preparation-triggered inspections "
+                      "also include the preparation handoff.\n"
                       "- The KittyPatcher release package is not included.\n"
-                      "- If ZIP attachments are unsupported, extract and "
-                      "attach the required files.\n\n"
+                      "- If ZIP attachments are unsupported, extract "
+                      "and attach the required files.\n\n"
                   )
 
           if missing:
               for name in missing:
                   print(f"::error::Missing bundle file: {name}")
-              raise SystemExit("Diagnostic bundle is incomplete.")
+
+              raise SystemExit(
+                  "Diagnostic bundle is incomplete."
+              )
           PY
 
       - name: Upload complete diagnostic bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Input-Compatibility-Report-${{ github.run_number }}
+          name: Input-Compatibility-Report-${{ github.run_id }}-${{ github.run_attempt }}
           path: inspection-output/
           include-hidden-files: true
           if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload preparation handoff on inspection failure
+        if: failure() && github.event_name == 'workflow_run'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Inspection-Handoff-Diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prepared-input-handoff/
+          if-no-files-found: warn
+          retention-days: 30
