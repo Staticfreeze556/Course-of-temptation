@@ -60,7 +60,7 @@ jobs:
           echo "name=Merged-Mods-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
       - name: Apply reviewed merge rules
-        run: python scripts/merge_mods.py
+        run: python .github/scripts/merge_mods.py
 
       - name: Verify merge outputs
         shell: bash
@@ -179,7 +179,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          python scripts/check_candidate.py
+          python .github/scripts/check_candidate.py
 
           if ($LASTEXITCODE -ne 0) {
             throw 'Candidate checks stopped the build. Read CandidateInspection.md.'
@@ -384,7 +384,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          python scripts/patch_report.py
+          python .github/scripts/patch_report.py
 
           if ($LASTEXITCODE -ne 0) {
             throw 'Patch report generation failed.'
