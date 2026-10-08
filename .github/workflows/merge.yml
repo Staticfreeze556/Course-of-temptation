@@ -8,10 +8,6 @@ on:
         required: true
         type: boolean
         default: false
-      patcher_release_tag:
-        description: 'Exact release tag containing KittyPatcher*.zip.'
-        required: true
-        type: string
       accept_static_warnings:
         description: 'I reviewed candidate warnings and accept diagnostic patching.'
         required: true
@@ -35,21 +31,15 @@ jobs:
       candidate_artifact: ${{ steps.artifact_info.outputs.name }}
 
     steps:
-      - name: Require review and patcher selection
+      - name: Require inspection review
         env:
           INSPECTION_REVIEWED: ${{ inputs.inspection_reviewed }}
-          PATCHER_RELEASE_TAG: ${{ inputs.patcher_release_tag }}
         shell: bash
         run: |
           set -euo pipefail
 
           if [ "$INSPECTION_REVIEWED" != "true" ]; then
             echo "::error::Review the current inspection before starting this build."
-            exit 1
-          fi
-
-          if [ -z "${PATCHER_RELEASE_TAG//[[:space:]]/}" ]; then
-            echo "::error::Enter the exact KittyPatcher release tag."
             exit 1
           fi
 
@@ -90,11 +80,13 @@ jobs:
               raise SystemExit("Candidate archive or manifest is missing.")
 
           data = json.loads(manifest.read_text(encoding="utf-8"))
+
           if not isinstance(data, dict):
               raise SystemExit("Merge manifest must contain a JSON object.")
 
           with zipfile.ZipFile(archive) as handle:
               bad = handle.testzip()
+
               if bad is not None:
                   raise SystemExit(f"Candidate ZIP integrity failure: {bad}")
 
@@ -103,6 +95,7 @@ jobs:
                   if not item.is_dir()
                   and item.filename.lower().endswith(".mod")
               ]
+
               if not mods:
                   raise SystemExit("Candidate contains no .mod files.")
 
@@ -137,7 +130,8 @@ jobs:
             echo "- Candidate artifact: $CANDIDATE_ARTIFACT"
             echo "- Candidate inspection runs next."
             echo "- Patching proceeds only if checks permit."
-            echo "- No separate patch workflow or Merge Run ID entry is needed."
+            echo "- KittyPatcher is selected from this repository's latest release."
+            echo "- No release tag or Merge Run ID entry is required."
           } >> "$GITHUB_STEP_SUMMARY"
 
   patch:
@@ -149,7 +143,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       MERGE_RUN_ID: ${{ github.run_id }}
-      PATCHER_RELEASE_TAG: ${{ inputs.patcher_release_tag }}
       ACCEPT_STATIC_WARNINGS: ${{ inputs.accept_static_warnings }}
 
     steps:
@@ -167,7 +160,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Path 'work/_candidate' -Force | Out-Null
+
+          New-Item -ItemType Directory -Path 'work/_candidate' -Force |
+            Out-Null
 
           if (Test-Path -LiteralPath 'work/mods') {
             Remove-Item -LiteralPath 'work/mods' -Recurse -Force
@@ -183,6 +178,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
           python scripts/check_candidate.py
 
           if ($LASTEXITCODE -ne 0) {
@@ -220,16 +216,20 @@ jobs:
               raise SystemExit("Accepted mod count does not match the manifest.")
 
           seen = set()
+
           for path in mods:
               key = path.name.casefold()
+
               if key in seen:
                   raise SystemExit(
                       f"Duplicate mod basename cannot be flattened: {path.name}"
                   )
+
               seen.add(key)
 
           if staging.exists():
               shutil.rmtree(staging)
+
           staging.mkdir(parents=True)
 
           for path in mods:
@@ -251,36 +251,64 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           Copy-Item -LiteralPath 'CourseOfTemptation.html' `
-            -Destination 'work/CourseOfTemptation.html' -Force
+            -Destination 'work/CourseOfTemptation.html' `
+            -Force
 
           if (-not (Test-Path -LiteralPath 'work/CourseOfTemptation.html')) {
             throw 'Working game HTML is missing.'
           }
 
-      - name: Download selected KittyPatcher release
+      - name: Select and download latest KittyPatcher release
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
+          $tagOutput = gh release view `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --json tagName `
+            --jq '.tagName'
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not identify the latest repository release.'
+          }
+
+          $tag = ($tagOutput | Out-String).Trim()
+
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw 'The latest release returned an empty tag.'
+          }
+
+          "PATCHER_RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+
           New-Item -ItemType Directory -Path 'work/_patcher_dl' -Force |
             Out-Null
 
-          gh release download "$env:PATCHER_RELEASE_TAG" `
+          @(
+            '# Patcher selection'
+            ''
+            '- Selection: latest repository release'
+            "- Repository: $env:GITHUB_REPOSITORY"
+            "- Resolved release tag: $tag"
+            ''
+          ) | Set-Content 'work/PatcherSelection.md' -Encoding utf8
+
+          gh release download "$tag" `
             --repo "$env:GITHUB_REPOSITORY" `
             --pattern 'KittyPatcher*.zip' `
             --dir 'work/_patcher_dl'
 
           if ($LASTEXITCODE -ne 0) {
-            throw 'Could not download the selected KittyPatcher release.'
+            throw "Could not download KittyPatcher*.zip from latest release '$tag'."
           }
 
           $zips = @(
             Get-ChildItem -LiteralPath 'work/_patcher_dl' `
-              -Filter 'KittyPatcher*.zip' -File
+              -Filter 'KittyPatcher*.zip' `
+              -File
           )
 
           if ($zips.Count -ne 1) {
-            throw "Expected one KittyPatcher ZIP; found $($zips.Count)."
+            throw "Latest release '$tag' must contain exactly one KittyPatcher ZIP; found $($zips.Count)."
           }
 
           $hash = (
@@ -288,16 +316,23 @@ jobs:
           ).Hash
 
           @(
-            '# Patcher selection'
-            ''
-            "- Release tag: $env:PATCHER_RELEASE_TAG"
             "- Asset: $($zips[0].Name)"
             "- SHA256: $hash"
             ''
-          ) | Set-Content 'work/PatcherSelection.md' -Encoding utf8
+          ) | Add-Content 'work/PatcherSelection.md' -Encoding utf8
+
+          @(
+            '## Automatic patcher selection'
+            ''
+            "- Latest release tag: $tag"
+            "- Asset: $($zips[0].Name)"
+            "- SHA256: $hash"
+            ''
+          ) | Add-Content $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
           Expand-Archive -LiteralPath $zips[0].FullName `
-            -DestinationPath 'work/_patcher' -Force
+            -DestinationPath 'work/_patcher' `
+            -Force
 
       - name: Run KittyPatcher
         timeout-minutes: 3
@@ -307,7 +342,9 @@ jobs:
 
           $executables = @(
             Get-ChildItem -LiteralPath 'work/_patcher' `
-              -Recurse -File -Filter 'KittyPatcher*.exe'
+              -Recurse `
+              -File `
+              -Filter 'KittyPatcher*.exe'
           )
 
           if ($executables.Count -ne 1) {
@@ -317,7 +354,8 @@ jobs:
           $exe = $executables[0]
 
           Copy-Item -LiteralPath $exe.FullName `
-            -Destination (Join-Path 'work' $exe.Name) -Force
+            -Destination (Join-Path 'work' $exe.Name) `
+            -Force
 
           $code = $null
           Push-Location 'work'
@@ -374,6 +412,7 @@ jobs:
           $text = [IO.File]::ReadAllText($path, $utf8)
 
           $message = $env:BUILD_BADGE
+
           if ([string]::IsNullOrWhiteSpace($message)) {
             $message = 'Diagnostic KittyPatcher build; gameplay unverified.'
           }
