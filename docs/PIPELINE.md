@@ -28,3 +28,8 @@ Per build, in `merge.yml`'s Windows job:
 
 ### Baseline comparison (optional, manual)
 To compare against a previous run: download `handoff-summary.json` from that run's handoff artifact (Actions → run → Artifacts; artifacts expire after 90 days) and commit it as `.github/handoff-baseline.json`. Later handoffs show changes against it. Without that file, the handoff says "No comparison baseline available." There's no automatic cross-run retrieval (deferred).
+
+### Known gap: Linux merge-job failure
+If "Merge reviewed original mods" (Linux) fails, the Windows job doesn't run and no build handoff is produced. Give the receiving AI both of these:
+1. The Inspect handoff for the same commit (artifact `AI-Handoff-Inspect-<run id>-<attempt>` on the "02 - Inspect" run).
+2. The failed merge job's log (`gh run view <run id> --log-failed`, or download it from the job page), plus `Merge-Report-<run id>-<attempt>` if it was uploaded.
