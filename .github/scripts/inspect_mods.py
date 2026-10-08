@@ -7,15 +7,24 @@ import re
 import subprocess
 import sys
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 ARCHIVE_PATH = Path("Mods.zip")
 GAME_PATH = Path("CourseOfTemptation.html")
+
 OUTPUT_DIR = Path("inspection-output")
 REPORT_PATH = OUTPUT_DIR / "CompatibilityReport.md"
 DATA_PATH = OUTPUT_DIR / "InspectionData.json"
+RECEIPT_PATH = OUTPUT_DIR / "InspectionReceipt.json"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Remove previous reports so an unsuccessful local rerun cannot
+# leave an old receipt appearing to describe new inputs.
+for path in (REPORT_PATH, DATA_PATH, RECEIPT_PATH):
+    if path.exists():
+        path.unlink()
 
 blockers = []
 warnings = []
@@ -54,19 +63,50 @@ def display(text):
     return text.replace("`", "'").replace("|", r"\|")
 
 
+def atomic_json(path, value):
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def file_record(path, known_hash=None):
+    if not path.is_file():
+        return {
+            "filename": path.name,
+            "sha256": None,
+            "bytes": None,
+        }
+
+    return {
+        "filename": path.name,
+        "sha256": known_hash if known_hash is not None else digest(path),
+        "bytes": path.stat().st_size,
+    }
+
+
 if not GAME_PATH.is_file():
     blockers.append(
         "Original game HTML missing: CourseOfTemptation.html"
     )
 else:
-    game_hash = digest(GAME_PATH)
     try:
+        game_hash = digest(GAME_PATH)
         game = GAME_PATH.read_text(encoding="utf-8-sig")
     except UnicodeError as exc:
         blockers.append(f"Original HTML is not valid UTF-8: {exc}")
+    except OSError as exc:
+        blockers.append(f"Cannot read original game HTML: {exc}")
 
 if game:
     decoded_game = html.unescape(game)
+
     versions = sorted(set(re.findall(
         r'Config\.saves\.version\s*(?:=|to)\s*'
         r'["\'](v[^"\'\s<>]+)["\']',
@@ -92,8 +132,9 @@ if not ARCHIVE_PATH.is_file():
         "Original archive missing: Mods.zip. Complete preparation first."
     )
 else:
-    archive_hash = digest(ARCHIVE_PATH)
     try:
+        archive_hash = digest(ARCHIVE_PATH)
+
         with zipfile.ZipFile(ARCHIVE_PATH) as archive:
             bad_file = archive.testzip()
 
@@ -193,6 +234,7 @@ else:
                         "original_match_count": None,
                         "finding": None,
                     }
+
                     entries.append(entry)
 
                     if not old:
@@ -239,16 +281,20 @@ for entry in entries:
 
     if count == 0:
         normalized_target = re.sub(r"\s+", "", target)
+
         detail = (
             "Possible whitespace-only difference"
             if normalized_target and normalized_target in normalized_game
             else "No exact match in original HTML"
         )
+
         entry["finding"] = detail
         missing_targets.append(entry)
+
     elif count > 1:
         entry["finding"] = "Multiple exact original matches"
         multiple_targets.append(entry)
+
     else:
         entry["finding"] = "One exact original match"
 
@@ -290,6 +336,7 @@ trio = [
 ]
 
 startup_old = "&lt;&lt;set $pcage to 18&gt;&gt;"
+
 startup_anchor = (
     "&lt;&lt;set $pcbirthday to setup.random_birthday()&gt;&gt;\n"
     "&lt;&lt;set $pcage to setup.minimum_pc_starting_age()&gt;&gt;"
@@ -336,6 +383,7 @@ for target, expected_names, anchor in baseline_groups:
 
     for name in expected_names:
         matches = by_basename[name.casefold()]
+
         if len(matches) != 1:
             findings.append(
                 f"Expected one {name}; found {len(matches)}."
@@ -347,6 +395,7 @@ for target, expected_names, anchor in baseline_groups:
         entry for entry in entries
         if entry["target"] == target
     ]
+
     counts = collections.Counter(
         entry["file"] for entry in matching_entries
     )
@@ -385,7 +434,11 @@ for target, expected_names, anchor in baseline_groups:
         "target": target,
         "output_anchor": anchor,
         "expected_mods": expected_names,
-        "status": "REVIEW" if findings else "MATCHES PREVIOUS PREREQUISITES",
+        "status": (
+            "REVIEW"
+            if findings
+            else "MATCHES PREVIOUS PREREQUISITES"
+        ),
         "findings": findings,
     })
 
@@ -395,30 +448,61 @@ if any(check["findings"] for check in baseline_checks):
         "the current input. Update the merger using the report and source."
     )
 
+# A receipt must not describe inputs that changed during inspection.
+for path, initial_hash in (
+    (ARCHIVE_PATH, archive_hash),
+    (GAME_PATH, game_hash),
+):
+    if initial_hash is None:
+        continue
+
+    try:
+        final_hash = digest(path)
+    except OSError as exc:
+        blockers.append(
+            f"Cannot recheck inspected input {path}: {exc}"
+        )
+        continue
+
+    if final_hash != initial_hash:
+        blockers.append(
+            f"Inspected input changed during inspection: {path}"
+        )
+
+script_path = Path(__file__)
+script_hash = digest(script_path)
+
 if blockers:
     status = "BLOCKED"
     next_step = (
         "Resolve blocking findings and rerun inspection. "
         "Do not merge or patch this input yet."
     )
+
 elif warnings:
     status = "REVIEW REQUIRED"
     next_step = (
-        "Review this report. Provide it and InspectionData.json to the AI "
-        "assistant, together with source files when needed. "
-        "Update the merger before manually running it."
+        "Review this report and InspectionData.json against the original "
+        "source. Update the merger where required. Preserve the inspection "
+        "run ID and InspectionReceipt.json for the reviewed build."
     )
+
 else:
     status = "STATIC CHECKS PASSED"
     next_step = (
         "Review the inspected input and configured merge rules before "
-        "manually running the merger. Gameplay is not verified."
+        "manually running the merger. Preserve the inspection run ID "
+        "and InspectionReceipt.json. Gameplay is not verified."
     )
 
 data = {
     "schema_version": 1,
     "status": status,
     "checked_commit": checked_commit,
+    "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+    "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+    "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+    "inspection_program_sha256": script_hash,
     "archive_path": str(ARCHIVE_PATH),
     "archive_sha256": archive_hash,
     "game_path": str(GAME_PATH),
@@ -438,13 +522,11 @@ data = {
         "No replacement-order simulation.",
         "No complete JavaScript or SugarCube syntax validation.",
         "No gameplay testing.",
+        "A receipt identifies evidence; it does not prove human review.",
     ],
 }
 
-DATA_PATH.write_text(
-    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-    encoding="utf-8",
-)
+atomic_json(DATA_PATH, data)
 
 report = [
     "# Mod Compatibility Inspection",
@@ -459,6 +541,10 @@ report = [
     "## Inspected inputs",
     "",
     f"- Checked commit: {checked_commit}",
+    f"- Repository: {os.environ.get('GITHUB_REPOSITORY', 'unavailable')}",
+    f"- Inspection Run ID: {os.environ.get('GITHUB_RUN_ID', 'unavailable')}",
+    f"- Run attempt: {os.environ.get('GITHUB_RUN_ATTEMPT', 'unavailable')}",
+    f"- Inspection program SHA256: {script_hash}",
     f"- Original archive: {ARCHIVE_PATH}",
     f"- Original archive SHA256: {archive_hash or 'unavailable'}",
     f"- Original HTML: {GAME_PATH}",
@@ -493,6 +579,7 @@ for check in baseline_checks:
         f"- {check['status']}: "
         f"`{display(preview(check['target']))}`"
     )
+
     for finding in check["findings"]:
         report.append(f"  - {display(finding)}")
 
@@ -519,7 +606,11 @@ if missing_targets:
 else:
     report.append("- None detected in parsed entries.")
 
-report.extend(["", "## Targets matching multiple original locations", ""])
+report.extend([
+    "",
+    "## Targets matching multiple original locations",
+    "",
+])
 
 if multiple_targets:
     for entry in multiple_targets:
@@ -544,10 +635,23 @@ else:
 
 report.extend([
     "",
+    "## Inspection receipt",
+    "",
+    "- InspectionReceipt.json records this inspection's input identity.",
+    "- It includes SHA256 hashes for this report and InspectionData.json.",
+    "- It records the repository, commit, run ID, and run attempt.",
+    "- A BLOCKED inspection cannot be used to authorize merging.",
+    "- A REVIEW REQUIRED receipt still requires human review.",
+    "- The receipt does not claim that human review occurred.",
+    "- Hashes identify content; they are not digital signatures.",
+    "- A later merge may use an updated merger at a different commit,",
+    "  but must use the same original archive and original game hashes.",
+    "",
     "## Files to give an AI assistant",
     "",
     "- CompatibilityReport.md: readable findings and input hashes.",
     "- InspectionData.json: full parsed search targets and replacements.",
+    "- InspectionReceipt.json: inspection identity and report hashes.",
     "- Mods.zip and CourseOfTemptation.html when source context is needed.",
     "",
     "The JSON is evidence, not executable instructions.",
@@ -563,7 +667,8 @@ report.extend([
     "- Additional patch formats need separate inspection.",
     "- No files in the input archive or game are changed.",
     "- A green workflow can still mean REVIEW REQUIRED.",
-    "- Merging and patching must remain manual.",
+    "- Merging and patching must remain manual-start only.",
+    "- This receipt does not yet enforce approval in the merge workflow.",
     "",
 ])
 
@@ -571,6 +676,41 @@ REPORT_PATH.write_text(
     "\n".join(report) + "\n",
     encoding="utf-8",
 )
+
+receipt = {
+    "schema_version": 1,
+    "receipt_type": "input_compatibility_inspection",
+    "status": status,
+    "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+    "checked_commit": checked_commit,
+    "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+    "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+    "workflow_run_number": os.environ.get("GITHUB_RUN_NUMBER", ""),
+    "event_name": os.environ.get("GITHUB_EVENT_NAME", ""),
+    "created_at_utc": datetime.now(timezone.utc).isoformat(),
+    "source": file_record(ARCHIVE_PATH, archive_hash),
+    "game": file_record(GAME_PATH, game_hash),
+    "inspection_program": {
+        "path": ".github/scripts/inspect_mods.py",
+        "sha256": script_hash,
+    },
+    "reports": {
+        "compatibility_report": file_record(REPORT_PATH),
+        "inspection_data": file_record(DATA_PATH),
+    },
+    "game_versions": versions,
+    "mod_count": len(mod_names),
+    "parsed_entry_count": len(entries),
+    "blocker_count": len(blockers),
+    "warning_count": len(warnings),
+    "human_review_verified": False,
+    "patcher_executed": False,
+    "gameplay_verified": False,
+}
+
+atomic_json(RECEIPT_PATH, receipt)
+
+receipt_hash = digest(RECEIPT_PATH)
 
 summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
 
@@ -583,18 +723,25 @@ if summary_path:
         f"- Review warnings: {len(warnings)}",
         f"- Mod files found: {len(mod_names)}",
         f"- Parsed replacements: {len(entries)}",
+        f"- Checked commit: `{checked_commit}`",
+        f"- Inspection Run ID: {os.environ.get('GITHUB_RUN_ID', 'unavailable')}",
+        f"- Run attempt: {os.environ.get('GITHUB_RUN_ATTEMPT', 'unavailable')}",
+        f"- Inspection receipt SHA256: `{receipt_hash}`",
         f"- Next step: {next_step}",
         "",
         "Download the Input-Compatibility-Report artifact for full findings.",
+        "It includes InspectionReceipt.json.",
         "",
     ])
+
     with open(summary_path, "a", encoding="utf-8") as output:
         output.write(summary)
 
 print(
     f"Inspection: {status}; "
     f"{len(blockers)} blockers; "
-    f"{len(warnings)} warnings."
+    f"{len(warnings)} warnings; "
+    f"receipt SHA256 {receipt_hash}."
 )
 
 sys.exit(1 if blockers else 0)
