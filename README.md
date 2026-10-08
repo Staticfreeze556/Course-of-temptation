@@ -7,8 +7,23 @@
 2. Upload a ZIP containing all your original mods to the repository root.
    Upload only one new ZIP at a time. It will automatically be named `Mods.zip`.
 
-3. Wait for preparation and compatibility inspection to finish.
-   Download the `Input-Compatibility-Report` ZIP.
+3. Download the diagnostic ZIP:
+   - Open the repository’s **Actions** tab.
+   - Wait for `01 - Prepare Input Mods` to finish successfully.
+   - Select `02 - Inspect Input Compatibility` from the workflow list.
+   - Open the newest run for your uploaded mods and wait for it to finish.
+   - On that run’s summary page, scroll down to **Artifacts**.
+   - Click `Input-Compatibility-Report-<number>` to download the ZIP.
+
+   The ZIP should contain:
+   - `AI-HANDOFF.md`
+   - `CompatibilityReport.md`
+   - `InspectionData.json`
+
+   An inspection failure can still produce a useful diagnostic ZIP.
+   If the artifact is missing or does not contain all three files,
+   check the failed step’s log before continuing.
+
 
 4. Upload that ZIP to your AI and say:
    “Read AI-HANDOFF.md first, then review the diagnostic files and provide
