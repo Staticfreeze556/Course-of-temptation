@@ -207,7 +207,7 @@ def check():
             "Candidate archive hash does not match its manifest."
         )
 
-    merge_program = Path("scripts/merge_mods.py")
+    merge_program = Path(".github/scripts/merge_mods.py")
 
     if not merge_program.is_file():
         blockers.append("Merge program is missing from this checkout.")
