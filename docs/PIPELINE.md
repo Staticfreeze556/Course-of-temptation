@@ -40,3 +40,10 @@ If "Merge reviewed original mods" (Linux) fails, the Windows job doesn't run and
 - The diagnostic AI handoff was generated and uploaded despite the stop.
 - This status applies to the release identified above. A newer release is selected automatically and gets its own behavior check; this note doesn't describe it.
 - Don't weaken or bypass the gate. `accept_patcher_behavior_findings=true` produces only a build labeled diagnostic, and doing that is the owner's decision.
+
+## KittyPatcher entity double-escaping (merger workaround)
+- **Cause** (confirmed from the released v0.1.2 source and reproduced on Windows in run 37752710899): `escape_twine_tags` runs `html.escape` over the whole Replace:/With: block, search text included, whenever the block contains a raw `<<macro>>`. Entities already in the block (`&quot;`, `&lt;`, `&#39;`) become `&amp;quot;` and so on, so the search text no longer matches. The patcher still exits 0.
+- **Repair:** `merge_mods.py` uses `.github/scripts/kitty_escape.py` to pre-apply that same conversion, but without double-escaping existing entities. The converted blocks contain no raw `<<…>>`, so the patcher leaves them unchanged. Mod content is otherwise as authored. Converted blocks are listed under `pre_escaped_replace_blocks` in `MergeManifest.json` and in `MergeReport.md`. The original `Mods.zip` isn't modified.
+- **Effect** (simulated with the patcher's source logic against the real game): m-mod-cheatplus goes from 8 to 28 of 29 matching blocks, and no other mod changes. The remaining block differs only in indentation; it's an outdated mod line and is still reported.
+- **Regression check:** the behavior check has a required case (a mixed block, pre-escaped by the merger, must apply with the selected EXE) and records the unconverted case as profile-only.
+- **Patcher repair (not applied):** the upstream fix would replace `html.escape(new_content)` with an escape that leaves existing `&name;`/`&#n;` entities alone. That would need a rebuilt EXE and a new release, which is the owner's decision.

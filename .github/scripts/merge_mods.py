@@ -36,6 +36,12 @@ report = [
 ]
 
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kitty_escape import pre_escape_replace_blocks  # noqa: E402
+
+
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -401,11 +407,20 @@ def merge():
             "Obsolete fixed-age startup target remains."
         )
 
+    pre_escaped = {}
+
     for key, mod in mods.items():
+        text = "~~".join(mod["segments"])
+        text, converted = pre_escape_replace_blocks(text)
+
+        if converted:
+            pre_escaped[mod["name"]] = converted
+            mod["changed"] = True
+            changed_paths.add(mod["name"])
+
         if not mod["changed"]:
             continue
 
-        text = "~~".join(mod["segments"])
         text = text.replace("\n", mod["newline"])
         data = text.encode("utf-8")
 
@@ -487,6 +502,7 @@ def merge():
         "workflow_run_number": os.environ.get("GITHUB_RUN_NUMBER"),
         "checked_commit": checked_commit,
         "merge_program_sha256": program_hash,
+        "merge_helper_sha256": sha(Path(__file__).resolve().parent / "kitty_escape.py"),
         "source": {
             "filename": SOURCE.name,
             "sha256": source_hash,
@@ -500,6 +516,7 @@ def merge():
             "sha256": output_hash,
         },
         "merged_groups": changes,
+        "pre_escaped_replace_blocks": pre_escaped,
         "changed_files": sorted(changed_paths),
         "remaining_shared_targets": shared,
         "inspection_review": (
@@ -557,6 +574,10 @@ def merge():
         "- Set bare pclastresidence initialization to an empty string.",
         "  This is an unset sentinel, not a validated destination.",
         "- Change a trailing comma to a semicolon in the helper addition.",
+        "- Pre-escape Replace:/With: blocks that contain raw <<macros>>, as",
+        "  KittyPatcher v0.1.2 would, but without double-escaping existing",
+        "  entities (works around its &quot; -> &amp;quot; conversion).",
+        *[f"  - {name}: {n} blocks" for name, n in sorted(pre_escaped.items())],
         "",
         "## Not repaired by this ruleset",
         "",
@@ -567,7 +588,7 @@ def merge():
         "- Mismatched rental-action strings.",
         "- Other failed residence location replacements.",
         "- Remaining shared targets and other mod failures.",
-        "- Cheatplus syntax compatibility.",
+        "- Cheatplus Add Passage: and <e> sections (not supported by KittyPatcher).",
         "- New findings from future inspection reports.",
         "",
         "## Remaining shared targets",

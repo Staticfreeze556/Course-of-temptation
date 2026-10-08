@@ -437,6 +437,7 @@ jobs:
               ".github/scripts/prepare.py",
               ".github/scripts/inspect_mods.py",
               ".github/scripts/merge_mods.py",
+              ".github/scripts/kitty_escape.py",
               ".github/scripts/check_candidate.py",
               ".github/scripts/patch_report.py",
           ]
