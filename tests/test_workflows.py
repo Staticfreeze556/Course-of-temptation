@@ -17,29 +17,65 @@ def test_all_workflows_parse():
         assert yaml.safe_load(p.read_text())
 
 
-def _patch_job_steps():
-    jobs = load("merge.yml")["jobs"]
-    return [s for j in jobs.values() for s in j.get("steps", [])]
+def _patch_steps():
+    return load("merge.yml")["jobs"]["patch"]["steps"] if "patch" in load("merge.yml")["jobs"] else [
+        s for j in load("merge.yml")["jobs"].values() if j.get("runs-on") == "windows-latest"
+        for s in j["steps"]]
 
 
-def test_patcher_is_pinned_not_latest():
+def _names():
+    return [s.get("name") for s in _patch_steps()]
+
+
+# Requirement (owner, 2026-10-07): builds follow the latest KittyPatcher
+# release; v0.1.2 is a historical baseline, not a pin. These tests replace
+# the Phase 1 pin tests, which encoded the superseded requirement.
+
+def test_latest_release_resolved_exactly_once():
     text = (WF / "merge.yml").read_text()
-    assert "latest repository release" not in text
-    assert "gh release view" not in text
-    step = next(s for s in _patch_job_steps()
-                if s.get("name") == "Download pinned KittyPatcher release")
-    assert step["env"]["PATCHER_TAG"] == "kitty-patcher"
-    assert step["env"]["PATCHER_ASSET"] == "KittyPatcher.v0.1.2.zip"
-    assert step["env"]["PATCHER_ZIP_SHA256"] == PATCHER_ZIP_SHA256
-    assert "-ne $env:PATCHER_ZIP_SHA256" in step["run"]
-    assert "throw" in step["run"]
+    assert text.count("select_patcher.py resolve") == 1
+    assert "gh release" not in text and "releases/latest" not in text
 
 
-def test_patcher_exe_pinned_and_not_recursive():
-    step = next(s for s in _patch_job_steps() if s.get("name") == "Run KittyPatcher")
-    assert step["env"]["PATCHER_EXE_SHA256"] == PATCHER_EXE_SHA256
-    assert "-Recurse" not in step["run"]
-    assert "-ne $env:PATCHER_EXE_SHA256" in step["run"]
+def test_no_hard_coded_patcher_identity_in_workflow():
+    text = (WF / "merge.yml").read_text()
+    for pinned in ("v0.1.2", "kitty-patcher'", PATCHER_ZIP_SHA256, PATCHER_EXE_SHA256,
+                   "KittyPatcher.v0.1.2.zip"):
+        assert pinned not in text, pinned
+
+
+def test_step_order_resolve_verify_canary_then_patch():
+    n = _names()
+    order = ["Resolve latest KittyPatcher release (once per build)",
+             "Download selected KittyPatcher asset by ID",
+             "Verify digest and select executable",
+             "Patcher behavior canary",
+             "Run KittyPatcher",
+             "Record build identity"]
+    assert [n.index(x) for x in order] == sorted(n.index(x) for x in order)
+    assert n.index(order[0]) < n.index("Verify manifest and inspect candidate")
+
+
+def test_later_steps_use_recorded_selection():
+    steps = {s.get("name"): s for s in _patch_steps()}
+    for name in ("Download selected KittyPatcher asset by ID", "Verify digest and select executable",
+                 "Patcher behavior canary", "Run KittyPatcher"):
+        assert "work/_patcher/selection.json" in steps[name]["run"], name
+    run = steps["Run KittyPatcher"]["run"]
+    assert "-Recurse" not in run and "exe_sha256" in run
+
+
+def test_unverified_digest_needs_explicit_input():
+    wf = load("merge.yml")
+    inputs = wf[True]["workflow_dispatch"]["inputs"] if True in wf else wf["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["approve_unverified_patcher_sha256"]["default"] == ""
+    assert inputs["accept_patcher_behavior_findings"]["default"] is False
+
+
+def test_build_record_uploaded():
+    text = (WF / "merge.yml").read_text()
+    for f in ("work/BuildRecord.json", "work/PatcherCanary.json", "work/_patcher/selection.json"):
+        assert f in text
 
 
 def test_inspect_bundle_files_exist():

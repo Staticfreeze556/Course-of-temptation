@@ -48,3 +48,30 @@ Stopped at candidate inspection because of the Windows CRLF checkout. KittyPatch
 
 ## Diagnostic run 37733625592 (on Phase 2 head `722912e`)
 All checks passed and KittyPatcher ran: 73 applied, 105 failed. Output SHA256 `070fd80f…52de`. Diagnostic baseline: gameplay and save compatibility unverified. The EXE likely differs from its bundled source (cheatplus escaping). See [DIAGNOSTIC-RUN-37733625592.md](DIAGNOSTIC-RUN-37733625592.md).
+
+## Phase 2b: latest-release patcher selection (branch `pipeline-revamp-latest-patcher`, PR into `pipeline-revamp-phase2`)
+
+### Why
+Owner clarification: KittyPatcher updates arrive as GitHub Releases, and builds must follow the latest one without code edits. The Phase 1 permanent pin is superseded. v0.1.2 remains a historical baseline.
+
+### Changes
+- `.github/scripts/select_patcher.py`: resolve once, download by asset ID, digest verification (or explicit owner approval), layout-agnostic EXE selection.
+- `.github/scripts/patcher_canary.py`: synthetic-input behavior checks that run before the real patch.
+- `.github/scripts/build_record.py`: `BuildRecord.json`.
+- `.github/patcher-baselines.json`: v0.1.2 baseline (not a pin).
+- `merge.yml`: new inputs `approve_unverified_patcher_sha256` (default empty) and `accept_patcher_behavior_findings` (default false). New steps: resolve, download, verify, canary, run, record. The badge shows the build label and patcher tag.
+- **Test change, stated explicitly:** the Phase 1 tests `test_patcher_is_pinned_not_latest` and `test_patcher_exe_pinned_and_not_recursive` encoded the superseded pin requirement and were **replaced** by tests for the new requirement (resolve exactly once, no hard-coded identity, step order, selection reuse, approval inputs, record upload). They weren't removed to make anything pass.
+
+### Tests (local): 56 passed
+- End to end against a local fake GitHub API: publishing a newer valid release (new tag, asset name and folder layout, single EXE) changes the selected patcher with the workflow and scripts byte-identical before and after.
+- A release published between resolve and download doesn't change the selection, and `releases/latest` is called once.
+- Missing digest stops the build, a wrong approval fails, and the correct approval proceeds with mode `owner-approved-without-published-digest`.
+- Failures: digest mismatch, no or ambiguous asset, prerelease, no EXE, different EXEs, unsafe ZIP path. Identical copies collapse, as with v0.1.2.
+- Canary logic: an intended-literal patcher produces no findings; backslash rewriting and entity re-escaping are findings; a missing required replacement fails; findings block unless accepted, which yields a diagnostic label.
+- Local sanity run of the canary against KittyPatcher's **bundled .py source** (not the EXE): required checks pass. Finding: backslashes rewritten. Recorded: multi-match replaced 2 of 2, `.Mod` not loaded, LF output.
+
+### Not tested / limitations
+- The new `merge.yml` steps haven't run on Windows. The EXE's canary profile is unknown until a run, and from run 37733625592 it's expected to show at least the entity finding, which would stop the build until findings are accepted.
+- Real GitHub API behavior (redirect to asset storage with the token removed) is tested only by code reading. The fake server doesn't redirect.
+- Canary coverage is limited to the listed behaviors. It doesn't prove equivalence on the real game.
+- No gameplay or save testing.

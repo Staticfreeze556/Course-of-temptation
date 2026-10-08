@@ -13,6 +13,16 @@ on:
         required: true
         type: boolean
         default: false
+      approve_unverified_patcher_sha256:
+        description: 'Only if the latest KittyPatcher asset has no published digest: the SHA256 you independently confirmed. Leave empty otherwise.'
+        required: false
+        type: string
+        default: ''
+      accept_patcher_behavior_findings:
+        description: 'Accept patcher canary findings and produce a build labeled diagnostic.'
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -156,6 +166,16 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Resolve latest KittyPatcher release (once per build)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The ONLY place "latest" is resolved. Every later step uses
+          # work/_patcher/selection.json (release ID + asset ID).
+          python .github/scripts/select_patcher.py resolve `
+            --repo "$env:GITHUB_REPOSITORY" --out 'work/_patcher'
+          if ($LASTEXITCODE -ne 0) { throw 'KittyPatcher release selection failed.' }
+
       - name: Create working folders
         shell: pwsh
         run: |
@@ -258,96 +278,58 @@ jobs:
             throw 'Working game HTML is missing.'
           }
 
-      - name: Download pinned KittyPatcher release
+      - name: Download selected KittyPatcher asset by ID
         shell: pwsh
-        env:
-          # Pinned patcher. Change these only together, after reviewing
-          # the new release. See docs/PIPELINE.md "Patcher pinning".
-          PATCHER_TAG: 'kitty-patcher'
-          PATCHER_ASSET: 'KittyPatcher.v0.1.2.zip'
-          PATCHER_ZIP_SHA256: 'b105af5a3b73e4e4387d20e3eb67013f25a4a0b13a58a2b9a820a7a03b71d6d8'
         run: |
           $ErrorActionPreference = 'Stop'
+          python .github/scripts/select_patcher.py download --selection 'work/_patcher/selection.json'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the selected KittyPatcher asset.' }
 
-          "PATCHER_RELEASE_TAG=$env:PATCHER_TAG" >> $env:GITHUB_ENV
+      - name: Verify digest and select executable
+        shell: pwsh
+        env:
+          APPROVED_SHA256: ${{ inputs.approve_unverified_patcher_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python .github/scripts/select_patcher.py verify `
+            --selection 'work/_patcher/selection.json' `
+            --approve-sha256 "$env:APPROVED_SHA256"
+          if ($LASTEXITCODE -ne 0) { throw 'KittyPatcher verification failed. See the error above.' }
+          Copy-Item 'work/_patcher/PatcherSelection.md' 'work/PatcherSelection.md' -Force
+          Get-Content 'work/PatcherSelection.md' | Add-Content $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
-          New-Item -ItemType Directory -Path 'work/_patcher_dl' -Force |
-            Out-Null
-
-          gh release download "$env:PATCHER_TAG" `
-            --repo "$env:GITHUB_REPOSITORY" `
-            --pattern "$env:PATCHER_ASSET" `
-            --dir 'work/_patcher_dl'
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not download $env:PATCHER_ASSET from release '$env:PATCHER_TAG'."
-          }
-
-          $zipPath = Join-Path 'work/_patcher_dl' $env:PATCHER_ASSET
-
-          if (-not (Test-Path -LiteralPath $zipPath)) {
-            throw "Pinned asset $env:PATCHER_ASSET is missing after download."
-          }
-
-          $hash = (
-            Get-FileHash -LiteralPath $zipPath -Algorithm SHA256
-          ).Hash.ToLowerInvariant()
-
-          if ($hash -ne $env:PATCHER_ZIP_SHA256) {
-            throw "Patcher checksum mismatch. Expected $env:PATCHER_ZIP_SHA256, got $hash. Refusing to run it."
-          }
-
-          @(
-            '# Patcher selection'
-            ''
-            '- Selection: pinned release (not "latest")'
-            "- Repository: $env:GITHUB_REPOSITORY"
-            "- Release tag: $env:PATCHER_TAG"
-            "- Asset: $env:PATCHER_ASSET"
-            "- SHA256 (verified): $hash"
-            ''
-          ) | Set-Content 'work/PatcherSelection.md' -Encoding utf8
-
-          @(
-            '## Pinned patcher verified'
-            ''
-            "- Release tag: $env:PATCHER_TAG"
-            "- Asset: $env:PATCHER_ASSET"
-            "- SHA256: $hash"
-            ''
-          ) | Add-Content $env:GITHUB_STEP_SUMMARY -Encoding utf8
-
-          Expand-Archive -LiteralPath $zipPath `
-            -DestinationPath 'work/_patcher' `
-            -Force
+      - name: Patcher behavior canary
+        timeout-minutes: 3
+        shell: pwsh
+        env:
+          ACCEPT_FINDINGS: ${{ inputs.accept_patcher_behavior_findings }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sel = Get-Content 'work/_patcher/selection.json' -Raw | ConvertFrom-Json
+          python .github/scripts/patcher_canary.py prepare 'work/_canary'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare canary.' }
+          $exeName = Split-Path $sel.exe_path -Leaf
+          Copy-Item -LiteralPath $sel.exe_path -Destination (Join-Path 'work/_canary' $exeName) -Force
+          Push-Location 'work/_canary'
+          try { @('') | & ".\$exeName"; $code = $LASTEXITCODE } finally { Pop-Location }
+          Remove-Item -LiteralPath (Join-Path 'work/_canary' $exeName) -Force
+          if ($code -ne 0) { throw "Patcher exited with code $code on the canary." }
+          python .github/scripts/patcher_canary.py check 'work/_canary' `
+            --out 'work/PatcherCanary.json' --accept-findings "$env:ACCEPT_FINDINGS"
+          $canaryCode = $LASTEXITCODE
+          $report = Get-Content 'work/PatcherCanary.json' -Raw | ConvertFrom-Json
+          "BUILD_LABEL=$($report.build_label)" >> $env:GITHUB_ENV
+          if ($canaryCode -ne 0) { throw 'Patcher canary stopped the build before the real patch. See PatcherCanary.json.' }
 
       - name: Run KittyPatcher
         timeout-minutes: 3
         shell: pwsh
-        env:
-          PATCHER_EXE: 'KittyPatcher v0.1.2.exe'
-          PATCHER_EXE_SHA256: '872051498db367f6ce74060708f38ae8703de280f0365e967f9e347f58ee752b'
         run: |
           $ErrorActionPreference = 'Stop'
-
-          # The release ZIP contains this EXE twice (root and scripts/),
-          # byte-identical. Use the root copy explicitly instead of a
-          # recursive search, which finds two and fails.
-          $exePath = Join-Path 'work/_patcher' $env:PATCHER_EXE
-
-          if (-not (Test-Path -LiteralPath $exePath)) {
-            throw "Pinned patcher EXE '$env:PATCHER_EXE' is missing from the release ZIP root."
-          }
-
-          $exeHash = (
-            Get-FileHash -LiteralPath $exePath -Algorithm SHA256
-          ).Hash.ToLowerInvariant()
-
-          if ($exeHash -ne $env:PATCHER_EXE_SHA256) {
-            throw "Patcher EXE checksum mismatch. Expected $env:PATCHER_EXE_SHA256, got $exeHash."
-          }
-
-          $exe = Get-Item -LiteralPath $exePath
+          $sel = Get-Content 'work/_patcher/selection.json' -Raw | ConvertFrom-Json
+          $exeHash = (Get-FileHash -LiteralPath $sel.exe_path -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($exeHash -ne $sel.exe_sha256) { throw 'Selected executable changed after verification.' }
+          $exe = Get-Item -LiteralPath $sel.exe_path
 
           Copy-Item -LiteralPath $exe.FullName `
             -Destination (Join-Path 'work' $exe.Name) `
@@ -413,6 +395,8 @@ jobs:
             $message = 'Diagnostic KittyPatcher build; gameplay unverified.'
           }
 
+          $message = "[$env:BUILD_LABEL / patcher $env:PATCHER_RELEASE_TAG] $message"
+
           $badge = '<div id="modded-build-badge" style="position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#222;color:#fff;font:14px/1.3 sans-serif;padding:8px 44px 8px 12px;text-align:center;">' +
             [System.Net.WebUtility]::HtmlEncode($message) +
             '<button type="button" aria-label="Dismiss" onclick="this.parentNode.remove()" style="position:absolute;right:6px;top:4px;background:none;border:0;color:#fff;font-size:22px;">&times;</button></div>'
@@ -426,6 +410,14 @@ jobs:
           $text = $text.Substring(0, $index) + $badge + $text.Substring($index)
           [IO.File]::WriteAllText($path, $text, $utf8)
 
+      - name: Record build identity
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          python .github/scripts/build_record.py --out 'work/BuildRecord.json'
+          if (Test-Path 'work/BuildRecord.json') { Get-Content 'work/BuildRecord.json' | Out-String | Write-Output }
+
       - name: Upload candidate inspection and patch reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -435,6 +427,11 @@ jobs:
             work/CandidateInspection.md
             work/StructuredPatchReport.md
             work/PatcherSelection.md
+            work/PatcherCanary.json
+            work/BuildRecord.json
+            work/_patcher/selection.json
+            work/_patcher/latest-release.json
+            work/_canary/mods/logs/*.txt
           if-no-files-found: warn
 
       - name: Upload diagnostic game

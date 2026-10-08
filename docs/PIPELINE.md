@@ -6,20 +6,16 @@
 - Mods in formats the pipeline can't interpret are reported as `UNSUPPORTED_FORMAT_NOT_INSPECTED`, never as inspected (`tools/inventory.py`).
 - Failing tests are not removed or skipped to make CI green.
 
-## Patcher pinning
-`merge.yml` downloads exactly:
+## Patcher selection (latest release, resolved once)
+Owner's update process: upload a new game HTML or new mods to the repo, and publish
+KittyPatcher as a **GitHub Release**. The next build uses the newest release, with no code edits.
 
-| Field | Value |
-|---|---|
-| Release tag | `kitty-patcher` |
-| Asset | `KittyPatcher.v0.1.2.zip` |
-| ZIP SHA256 | `b105af5a3b73e4e4387d20e3eb67013f25a4a0b13a58a2b9a820a7a03b71d6d8` (matches GitHub's published asset digest) |
-| EXE | `KittyPatcher v0.1.2.exe` (ZIP root) |
-| EXE SHA256 | `872051498db367f6ce74060708f38ae8703de280f0365e967f9e347f58ee752b` |
+Per build, in `merge.yml`'s Windows job:
+1. **Resolve once.** `select_patcher.py resolve` calls `releases/latest` exactly once and records the release ID, tag, name, published time and the selected asset (ID, name, size, published digest) in `work/_patcher/selection.json`. Nothing later asks for "latest" again. Download is by asset ID, so a release published mid-run can't change the run.
+2. **Asset selection.** Exactly one asset matching `KittyPatcher*.zip` (case-insensitive). Zero or several means the build fails. Drafts and prereleases are refused.
+3. **Digest.** The download must equal GitHub's published `sha256:` digest. If the release publishes no digest, the build stops and asks you to re-run with `approve_unverified_patcher_sha256=<hash>`. It proceeds only if that hash equals the downloaded file.
+4. **Package layout.** ZIP paths are checked for safety. Members named `KittyPatcher*.exe` (any folder, any case) are candidates. Byte-identical copies are collapsed (shallowest path wins). Different executables make the selection ambiguous, and the build fails. No v0.1.2 filename or layout is assumed.
+5. **Behavior canary.** The selected EXE first patches a synthetic game (`patcher_canary.py`). Required checks (exact `~` and `Replace:/With:` replacement, missing target inserts nothing, untouched text kept, inputs unchanged) must pass. Profile checks compare to intended literal patching: entity text in files with raw `<<macro>>`, and backslashes in replacements. Any finding stops the build before the real patch, unless you re-run with `accept_patcher_behavior_findings=true`, which labels the build *diagnostic*. Multi-match count, `.Mod` loading and CRLF output are recorded.
+6. **Record.** `BuildRecord.json` records the release identity, ZIP and EXE SHA256, verification mode, canary result, original game and Mods.zip hashes, candidate and per-mod hashes, log hashes, and the output HTML hash.
 
-The job stops before running anything if either hash differs. The release ZIP contains the
-EXE twice (root and `scripts/`, byte-identical). The old recursive search found both and
-failed with "Expected one KittyPatcher EXE". The pinned step uses the root copy explicitly.
-
-To update the patcher: publish the new release, compute both hashes, update `merge.yml`
-and `tests/conftest.py` in the same reviewed commit.
+`.github/patcher-baselines.json` holds **historical regression baselines** (v0.1.2: ZIP `b105af5a…`, EXE `87205149…`, observed output `070fd80f…` for the current inputs). A match only adds a label. It isn't a pin.
